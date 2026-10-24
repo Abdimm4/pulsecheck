@@ -12,6 +12,10 @@ See [PulseCheck_PRD.md](PulseCheck_PRD.md) for the full requirements.
   vector (`pulsecheck.features`) and a transparent heuristic baseline (`pulsecheck.models`).
   The heuristic's thresholds are uncalibrated placeholders; its output is a debugging aid,
   not a finding about any video.
+- Phase 4: FaceForensics++ manifest and group-aware splits (`pulsecheck.dataset`), resumable
+  batch feature extraction, logistic-regression and random-forest classifiers and an
+  evaluation report (`pulsecheck.models.training`, `.evaluation`, `.report`). See
+  [docs/data-card.md](docs/data-card.md). No results are reported yet.
 
 ## Backend setup
 
@@ -75,5 +79,42 @@ result. Settings live in `configs/default.yaml` (`signal`, `features`, `heuristi
   "More consistent with real examples", "More consistent with manipulated examples" or
   "Inconclusive". It is inconclusive whenever signal quality, usable regions or face coverage
   are too low. The score is not a probability.
+
+## Dataset, training and evaluation (FaceForensics++)
+
+FaceForensics++ may only be used for non-commercial research and education. Keep the
+dataset, manifests, feature tables, models and reports under `data/` and `models/` (both
+ignored by Git), and never share videos or per-video data.
+
+```bash
+# 1. Manifest: one row per video, official splits, leakage checks (exit 2 on leakage).
+python scripts/build_manifest.py /path/to/ffpp --splits /path/to/ffpp/splits     --out data/manifests/ffpp_c23.csv
+#    pilot run: add --limit-per-class 25 --balance and use another --out name
+
+# 2. Features: resumable (re-run the same command), failures recorded with reason codes.
+python scripts/extract_features.py data/manifests/ffpp_c23.csv --workers 4
+
+# 3. Train on train, select on val (test is never read here).
+python scripts/train_model.py data/features/ffpp_c23.csv
+
+# 4. Score the test split once, with the heuristic baseline for comparison.
+python scripts/evaluate.py data/features/ffpp_c23.csv     --model models/ffpp-c23-logreg-<stamp>.pkl --model models/ffpp-c23-forest-<stamp>.pkl
+```
+
+- Manifest fields follow PRD Section 13 (plus `source_video_id`, `group_id`,
+  `compression`); a `.csv.json` sidecar records options, counts, warnings and license notes.
+- Missing features are imputed with the training median plus a missing-indicator column;
+  features missing in over 95% of training videos are dropped. Preprocessing is fitted on
+  train only; hyperparameters, the decision threshold and an inconclusive band are chosen on
+  validation. A quality gate (the heuristic's thresholds; `--no-quality-gate` to disable)
+  makes low-quality videos inconclusive.
+- Each model is saved as `models/<name>.pkl` with a `.json` sidecar: config, feature list,
+  data version (feature-table and manifest hashes), training dataset and license, and
+  train/val metrics. Load only `.pkl` files you created.
+- Reports (`data/reports/evaluation-test-<stamp>.md/.json/.predictions.csv`) give accuracy,
+  precision, recall, specificity, F1, ROC-AUC, confusion matrices, per-method results,
+  group-bootstrap 95% intervals, coverage, inconclusive and failure rates and runtime, and
+  state their evaluation conditions. A second test evaluation of a model needs `--force` and
+  is flagged.
 
 Keep videos and datasets out of Git (see `.gitignore`).

@@ -16,6 +16,8 @@ dependencies = [
     "opencv-contrib-python>=4.10",
     # Pure-Python YAML parser; PyYAML has no wheel for every Python we use.
     "ruamel.yaml>=0.18",
+    # Trained classifiers (logistic regression, random forest) and metrics.
+    "scikit-learn>=1.5",
     "scipy>=1.14",
 ]
 

@@ -6,6 +6,8 @@ node_modules/
 *.mov
 data/
 models/*.pkl
+# Trained-model sidecars (regenerate with scripts/train_model.py)
+models/*.json
 # Downloaded model files (fetch with scripts/download_models.py)
 *.task
 # Python build/tool caches
