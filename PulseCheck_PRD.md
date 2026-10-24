@@ -4,11 +4,11 @@
 
 | | |
 |---|---|
-| **Version** | 2.2 (adds legal/compliance, website design, accessibility, SEO, analytics, paid-service, and regional-availability requirements) |
-| **Date** | October 19, 2026 |
+| **Version** | 2.3 (PulseCheck is now a free, non-commercial tool; all payment, pricing, and refund requirements removed) |
+| **Date** | October 24, 2026 |
 | **Product owner** | Solo developer |
 | **Product type** | Public web application / computer-vision research tool |
-| **Release model** | Paid video analysis with guest checkout (no accounts), rate-limited, automatic deletion, not offered in restricted jurisdictions |
+| **Release model** | Free, non-commercial video analysis with no accounts, rate-limited, automatic deletion, not offered in restricted jurisdictions |
 
 ---
 
@@ -16,7 +16,7 @@
 
 PulseCheck is a public website where anyone can upload a short video of a face and receive an experimental deepfake analysis based on remote photoplethysmography (rPPG). The detection engine extracts subtle color variations from facial regions, processes their time-series signals, calculates signal-quality and consistency features, and applies a documented baseline or machine-learning classifier.
 
-The product will use a React + TypeScript frontend, a Python FastAPI backend, and a separate background worker for computationally expensive video analysis. Uploaded videos will be held in private temporary storage and automatically deleted according to a published retention policy. Users will not need to create an account for the MVP. PulseCheck is a **paid service** (no free tier; see Section 29) and will **not be offered in jurisdictions where biometric-privacy laws are determined to apply** (see LG-13).
+The product will use a React + TypeScript frontend, a Python FastAPI backend, and a separate background worker for computationally expensive video analysis. Uploaded videos will be held in private temporary storage and automatically deleted according to a published retention policy. Users will not need to create an account for the MVP. PulseCheck is a **free, non-commercial research and educational tool** (see Section 29) and will **not be offered in jurisdictions where biometric-privacy laws are determined to apply** (see LG-13).
 
 The result is evidence, not proof. A real video can have weak pulse signals, and a manipulated video can contain plausible physiological patterns. The application must include an "inconclusive" outcome and communicate limitations clearly.
 
@@ -76,7 +76,7 @@ Review the relevant papers and dataset terms before implementation. Historical p
 6. Evaluate models on defensible, held-out data splits.
 7. Provide reproducible tests, documentation, and deployment configuration.
 8. Demonstrate computer vision, signal processing, ML evaluation, full-stack development, API design, security, and deployment.
-9. Operate as a paid service with transparent pricing, secure third-party payment handling, and a clear refund policy.
+9. Operate as a free, non-commercial tool, with usage limits that keep hosting costs under control.
 10. Restrict availability in jurisdictions where applicable biometric-privacy laws create unacceptable legal risk.
 
 ---
@@ -88,7 +88,8 @@ Review the relevant papers and dataset terms before implementation. Historical p
 - Medical-grade heart-rate measurement or diagnosis.
 - Detecting fake audio, images, or all forms of synthetic media.
 - Unlimited uploads or guaranteed real-time processing.
-- Building user accounts, saved analysis history, or social features. (Payments are **in scope**; see Section 29.)
+- Building user accounts, saved analysis history, or social features.
+- Charging for analyses, taking payments, or showing advertising (see Section 29).
 - Training a large video neural network from scratch before the signal pipeline is validated.
 - Making high-stakes legal, employment, identity, or safety decisions based on the result.
 
@@ -116,7 +117,7 @@ Review the relevant papers and dataset terms before implementation. Historical p
 
 The MVP does not retain a personal history of past analyses. If a user refreshes or closes the page, the result may be lost unless the temporary job token is still valid. This must be explained in the interface.
 
-> **Paid-service update:** Because PulseCheck is paid, the journey includes a region check, price disclosure, and guest checkout before upload analysis begins. See Section 29 and LG-13.
+> **Regional availability:** The journey begins with a region check before the upload form is shown. See LG-13.
 
 ---
 
@@ -135,7 +136,6 @@ The MVP does not retain a personal history of past analyses. If a user refreshes
 - React + TypeScript upload/result interface.
 - FastAPI backend.
 - Anonymous, rate-limited job submission.
-- Paid guest checkout through a third-party payment processor, with refund handling (Section 29).
 - Regional availability restrictions for blocked jurisdictions (LG-13).
 - Background analysis worker.
 - Private temporary video storage.
@@ -174,7 +174,6 @@ The MVP does not retain a personal history of past analyses. If a user refreshes
 | Metadata database | PostgreSQL | Job state, timestamps, expiry, result metadata |
 | Temporary video storage | Private Cloudflare R2 or Amazon S3 bucket | Uploads and short-lived artifacts |
 | Upload transport | Presigned upload URL where supported | Upload to private storage without exposing storage credentials |
-| Payments | `[PAYMENT PROCESSOR — TO BE CHOSEN]` hosted checkout | Collect payment without the app handling card data |
 | Region detection | CDN/edge geolocation headers or a documented geo-IP service | Enforce regional availability restrictions (LG-13) |
 | Testing | pytest + Vitest + React Testing Library | Python and frontend tests |
 | Code quality | Ruff + TypeScript checks | Formatting, linting, static checks |
@@ -246,7 +245,7 @@ These are proposed initial product limits. Adjust them after load and memory tes
 - Add request timeouts, worker timeouts, and memory/CPU limits.
 - Return a clear "service busy; try again later" message when capacity is exhausted.
 - Add CAPTCHA or other friction only if abuse is observed or threat modeling justifies it.
-- The service is paid and has no free usage allowance (Section 29). Do not promise fixed usage quotas until hosting cost and abuse patterns are understood.
+- The service is free (Section 29), so the developer bears all hosting cost. Set conservative per-visitor and global daily analysis caps, and pause new jobs when a configurable monthly compute budget is reached. Do not promise fixed usage quotas until hosting cost and abuse patterns are understood.
 
 IP addresses can be personal data in some jurisdictions. Retain only what is needed for security, restrict access, and document log retention. Do not build invasive fingerprinting into the MVP.
 
@@ -753,8 +752,9 @@ Use environment variables or a secrets manager for credentials. Do not commit se
 | Overly broad scope | Complete a working vertical slice before optional features |
 | Misleading scores | Document score semantics and calibration |
 | Dataset restrictions | Verify terms before download or redistribution |
-| Payment fraud and chargebacks | Hosted checkout, processor fraud tools, rate limits, clear pre-purchase terms, dispute runbook |
-| Restricted-region users bypass geo-blocking | Server-side checks, attestation, billing cross-check, Terms prohibition, counsel review |
+| Free compute is abused or hosting costs run away | Rate limits, daily caps, bounded queue, monthly budget cutoff, cost alerts (UP-2) |
+| Restricted-region users bypass geo-blocking | Server-side checks, attestation, Terms prohibition, counsel review |
+| Research-only dataset terms conflict with the project | Keep PulseCheck non-commercial; record dataset license on every trained model (Section 29) |
 
 ---
 
@@ -900,19 +900,16 @@ Add a Terms and Conditions page, linked from the footer and from the upload form
 - The contact/misuse-report form states why data is collected, links to the Privacy Policy, and does not require unnecessary fields.
 - Training on uploads remains **off**. Any future training use requires a separate, explicit, optional opt-in (consistent with UP-6).
 - Do not pre-tick any consent box and do not bundle optional consents with required ones.
-- Include a separate **unchecked** location attestation at checkout/upload (e.g., "I am not located in, and am not a resident of, a jurisdiction where PulseCheck is unavailable"), with a link to the list of unavailable regions (LG-13).
+- Include a separate **unchecked** location attestation at upload (e.g., "I am not located in, and am not a resident of, a jurisdiction where PulseCheck is unavailable"), with a link to the list of unavailable regions (LG-13).
 
-### LG-6: Refund and Cancellation Policy (required)
+### LG-6: Non-commercial status and dataset licenses
 
-PulseCheck is a paid service, so a Refund and Cancellation Policy is **mandatory before launch**. Requirements:
+PulseCheck is free and non-commercial (Section 29). This replaces the Refund and Cancellation Policy required in v2.2.
 
-- Publish it as its own page, linked from the pricing page, checkout, order confirmation email, and footer.
-- State, in plain language: what is refundable, the refund window `[REFUND WINDOW — TO BE COMPLETED]`, how to request a refund, how long refunds take to appear, and which payment method receives the refund.
-- State clearly whether analyses that finish with an **Inconclusive** result are billable `[DECISION REQUIRED — see PAY-5]`, and disclose this **before** purchase.
-- Provide an automatic refund or re-run when a job fails because of a service error, timeout, or capacity problem.
-- Disclose before purchase that results are experimental and not guaranteed to be correct.
-- If any recurring billing or expiring credits are offered, add cancellation and renewal terms that comply with applicable state automatic-renewal and consumer-protection laws (PAY-6).
-- Have counsel review the policy for consistency with the Terms and consumer-protection rules in the jurisdictions served.
+- State on the About/Methodology page and in the Terms that PulseCheck is a free, non-commercial research and educational project.
+- No charges, paid tiers, subscriptions, advertising, sponsorships, or sale of data. Any future change requires a PRD revision and a fresh review of every dataset license first.
+- Some research datasets, including FaceForensics++, allow only non-commercial research and educational use. Record the source dataset and its license in the metadata of every trained model, and re-check these terms whenever the project's status changes.
+- When a job fails because of a service error, timeout, or capacity problem, tell the user plainly and let them retry.
 
 ### LG-7: Tracking audit
 
@@ -959,7 +956,7 @@ Review each item below for applicability based on where users are located and wh
 | **Illegal content handling** (e.g., child sexual abuse material, non-consensual intimate imagery) | The service accepts arbitrary user video. | Define an internal procedure: do not retain or redistribute; if apparent child sexual abuse material is discovered, determine reporting obligations under U.S. federal law with counsel. Limit human access to uploads. |
 | **Copyright / DMCA** | Users could upload copyrighted video. Temporary, private, automatically deleted processing lowers but may not remove exposure. | Evaluate with counsel whether to designate a DMCA agent and publish a takedown contact. |
 | **Consumer-protection and advertising law** (e.g., FTC Act deception rules; rules on fake reviews and testimonials) | Overstated detection claims or fabricated testimonials create deception risk. | Follow LG-9 and the claims register. |
-| **Payments, taxes, and consumer-protection law** (sales/VAT collection, automatic-renewal and refund rules, price-disclosure rules, PCI DSS) | PulseCheck is paid. Digital services can be taxable depending on location, and consumer-protection rules govern pricing, refunds, and renewals. | Follow Section 29. Use a hosted checkout so card data never touches the app. Confirm tax registration and collection duties and business-formation requirements with an accountant or attorney. |
+| **Non-commercial status** | PulseCheck is free, and some training/evaluation datasets permit only non-commercial research and educational use. | Follow LG-6 and Section 29. Keep the project non-commercial; revisit dataset licenses before any change. |
 | **Accessibility law** (e.g., ADA-based claims, Section 508 where relevant, EU accessibility rules for covered services) | Public websites face accessibility complaints. | Meet WCAG 2.2 AA; publish an accessibility statement and contact method. |
 | **Breach notification and security duties** | Private video is sensitive data. | Maintain an incident-response plan, access logging, least privilege, and know applicable state breach-notification deadlines. |
 | **Email and phone marketing rules** (CAN-SPAM, TCPA, etc.) | Only relevant if a contact form leads to follow-up messages or a mailing list is added. | No marketing messages without proper consent and unsubscribe handling. |
@@ -979,11 +976,10 @@ Review each item below for applicability based on where users are located and wh
 **Decision:** PulseCheck will not be offered to, sold to, or process uploads from users in jurisdictions where biometric-privacy laws are determined to apply to its face-region analysis.
 
 - **Initial blocked jurisdictions:** `[Illinois, Texas, Washington — CONFIRM WITH COUNSEL BEFORE LAUNCH]`. Counsel may add other states with biometric provisions or adjust the list. Keep the list in configuration (`configs/default.yaml`) so it can change without code changes.
-- **Server-side enforcement:** Check region on page load, before checkout, when a payment is confirmed, and at job creation. Hiding the form in the UI alone is not sufficient.
+- **Server-side enforcement:** Check region on page load and at job creation. Hiding the form in the UI alone is not sufficient.
 - **Trusted signal only:** Use region data supplied by the CDN or edge provider (or a documented geo-IP service). Accept location headers at the origin only from that provider (for example, by restricting origin access to the CDN) so clients cannot spoof them.
-- **Blocked experience:** Show a neutral "PulseCheck is not currently available in your region" page with no upload form and no payment option. Use an appropriate status (HTTP 403 or 451), set `noindex`, and avoid stating legal conclusions on the page. Provide a contact method for users who believe they were blocked in error.
-- **User attestation:** Require the unchecked location attestation in LG-5 at checkout and upload.
-- **Additional signals:** Where the payment processor supplies billing country or postal code, use it as a cross-check, and cancel and refund any order that conflicts with a blocked region.
+- **Blocked experience:** Show a neutral "PulseCheck is not currently available in your region" page with no upload form. Use an appropriate status (HTTP 403 or 451), set `noindex`, and avoid stating legal conclusions on the page. Provide a contact method for users who believe they were blocked in error.
+- **User attestation:** Require the unchecked location attestation in LG-5 at upload.
 - **Terms:** Prohibit use by people located in or resident in blocked jurisdictions and prohibit circumventing the restriction (for example, with a VPN).
 - **Privacy:** Use the IP address only to determine region. Store only a coarse result (allowed or blocked, plus region code) with the job. Disclose this in the Privacy Policy and apply the log-retention rules in LG-2.
 - **Known limitations:** IP geolocation is imperfect (VPNs, mobile carriers, database errors). The restriction reduces risk but does not eliminate it. Ask counsel whether location-based blocking is sufficient or whether residency-based controls are also needed.
@@ -1071,9 +1067,7 @@ Review each item below for applicability based on where users are located and wh
 | Terms and Conditions | Per LG-3 |
 | Cookie Policy | Per LG-4 |
 | Accessibility statement | Per DS-1 |
-| **Pricing** | Price, currency, what is included, tax note, link to Refund and Cancellation Policy (PAY-2) |
-| **Checkout / order confirmation / payment failed** | Hosted checkout plus confirmation and failure pages; `noindex`; no order IDs or emails in analytics (PAY-9) |
-| **Refund and Cancellation Policy** | Per LG-6 |
+| About | Free, non-commercial research and educational project; who runs it; dataset credits and citations (LG-6) |
 | **Region unavailable** | Per LG-13; `noindex` |
 | Contact / report misuse | Form or `mailto:` link, consent text per LG-5, response-time promise per DS-15 |
 | FAQ | Exactly 5 questions at launch (DS-13) |
@@ -1156,17 +1150,15 @@ PulseCheck has no customers, so "case studies" are **documented analyses of perm
 
 | Earlier requirement | Conflict or interaction | Resolution |
 |---|---|---|
-| Non-Goals: no payments (v2.0/v2.1) | Product is now paid | Payments moved in scope (Section 29); Refund and Cancellation Policy is mandatory (LG-6) |
+| v2.2: paid service, checkout, refunds | v2.3: product is free and non-commercial | Payments removed (Section 29); LG-6 now covers non-commercial status and dataset licenses |
 | UP-5: tokens must stay out of analytics/logs | Google Analytics requested | DS-20: sanitize URLs; consent first |
 | UP-2: IP-based rate limiting | Privacy/tracking | Disclose IP use and log retention in Privacy Policy; minimal retention |
 | Section 14: "not forensic proof" notice | Above-the-fold CTA | DS-8: show both together above the fold |
 | UP-6: privacy notice before upload | New consent checkbox | LG-5: checkbox links to Privacy and Terms; version recorded |
 | Section 8: Plotly.js/CDN | Third-party resource audit | LG-8: self-host libraries and fonts |
 | Section 21: portfolio/resume claims | Unsupported-claims rule | LG-9: only verified, measured claims |
-| UP-2: "do not promise a free usage allowance" | Product is paid, not free | No free tier or free-allowance wording anywhere; remove "free" from copy and metadata |
+| UP-2: rate limits | Free tool, developer pays hosting | Daily caps and monthly budget cutoff (UP-2); "free" may be used in copy, but no promise of unlimited or guaranteed use |
 | UP-2: IP-based rate limiting | IP also used for region check | Use IP transiently for region only; store coarse result; disclose (LG-13) |
-| Anonymous access (Sections 1, 6) | Guest checkout collects an email for receipts | Collect only the email; disclose in Privacy Policy; keep order records separate from video data (PAY-1, PAY-7) |
-| UP-5: tokens out of analytics/logs | Payments and order data | Never send order IDs, emails, or tokens to analytics (PAY-9, DS-20) |
 
 ---
 
@@ -1181,9 +1173,9 @@ PulseCheck has no customers, so "case studies" are **documented analyses of perm
 - **SEO/social:** unique titles and descriptions verified; `robots.txt` and `sitemap.xml` reachable; structured data validates; Open Graph previews verified.
 - **Performance:** Lighthouse/Web Vitals recorded; image sizes and formats checked.
 - **Claims:** claims register reviewed line by line against site copy.
-- **Legal review:** attorney sign-off recorded (or conscious decision to proceed documented) for Privacy, Terms, Cookies, Refund Policy, and the biometric-law analysis.
-- **Regional blocking:** a blocked region is refused at page load, checkout, payment confirmation, and job creation; forged region headers from a client are ignored; a VPN smoke test is documented; the attestation is required; the blocked-region list changes through configuration.
-- **Payments:** checkout in the processor's test mode; webhook signature verification; duplicate and replayed webhooks are idempotent; analysis starts only after confirmed payment; failed payment, cancelled checkout, refund, and chargeback flows are tested; no card data appears in logs or the database; price and tax display match what is charged.
+- **Legal review:** attorney sign-off recorded (or conscious decision to proceed documented) for Privacy, Terms, Cookies, and the biometric-law analysis.
+- **Regional blocking:** a blocked region is refused at page load and job creation; forged region headers from a client are ignored; a VPN smoke test is documented; the attestation is required; the blocked-region list changes through configuration.
+- **Usage caps:** per-visitor and global daily caps are enforced; new jobs pause cleanly with a clear message when the monthly compute budget is reached.
 
 ---
 
@@ -1194,9 +1186,9 @@ Add the following to the roadmap:
 - **Phase 7 additions (Weeks 7–9):** business-details placeholders resolved; consent banner, cookie inventory, tracker audit, and third-party resource audit; self-hosted fonts and libraries.
 - **Phase 8 additions (Weeks 9–12):** write and publish Privacy, Terms, Cookie, FAQ, Contact, accessibility statement, thank-you, 404, and expired-job pages; claims-register review; accessibility, mobile, SEO, and performance QA; attorney review.
 
-- **Payments and regional availability (Weeks 6–9):** payment-processor integration and webhooks, pricing and checkout pages, refund flow, tax setup, edge geolocation enforcement and region-unavailable page.
+- **Usage caps and regional availability (Weeks 6–9):** daily caps and budget cutoff, edge geolocation enforcement and region-unavailable page.
 
-Estimated added effort (planning estimate, not a guarantee): roughly **25–50 hours** in total for the legal, design, payment, and regional-availability additions, mostly in Phases 6–8, plus time for external legal and tax review. This may extend the total solo-developer estimate in Section 2 by about 2–5 weeks.
+Estimated added effort (planning estimate, not a guarantee): roughly **20–40 hours** in total for the legal, design, usage-cap, and regional-availability additions, mostly in Phases 6–8, plus time for external legal review. This may extend the total solo-developer estimate in Section 2 by about 2–4 weeks.
 
 ---
 
@@ -1208,14 +1200,13 @@ Estimated added effort (planning estimate, not a guarantee): roughly **25–50 h
 - [ ] Privacy Policy, Terms and Conditions, and Cookie Policy published and linked from the footer and upload form.
 - [ ] Cookie consent banner works; no non-essential tag fires before consent.
 - [ ] Upload form has unchecked, versioned consent checkbox.
-- [ ] Refund and Cancellation Policy published and linked from pricing, checkout, confirmation emails, and footer (LG-6).
+- [ ] Non-commercial status stated on the About page and in the Terms; dataset licenses recorded on every trained model (LG-6).
 - [ ] Tracking and third-party embed audits completed and documented.
 - [ ] Claims register complete; no unsupported claims remain.
 - [ ] Biometric-privacy, children's-privacy, GDPR/UK, and state-law applicability reviewed; decisions recorded.
 - [ ] Misuse/takedown contact and incident runbook in place.
 - [ ] Blocked-jurisdiction list confirmed with counsel and enforced server-side; region-unavailable page live (LG-13).
-- [ ] Paid checkout works end to end through a hosted processor; no card data stored; webhooks verified; refunds and failed-job handling tested (Section 29).
-- [ ] Pricing, taxes, and business registration confirmed with an accountant or attorney; no "free" wording remains on the site.
+- [ ] Daily caps and monthly budget cutoff enforced and tested (UP-2, Section 29).
 
 ### Design, accessibility, and SEO
 
@@ -1231,57 +1222,44 @@ Estimated added effort (planning estimate, not a guarantee): roughly **25–50 h
 
 ---
 
-## 29. Commercial Model, Payments, and Regional Availability
+## 29. Free, Non-Commercial Model and Regional Availability
 
 ### 29.1 Decision
 
-PulseCheck is a **paid service**. There is no free tier and no free-usage allowance. Do not use the word "free" in site copy, metadata, FAQs, social tags, or marketing. The service is also **not offered in blocked jurisdictions** (LG-13).
+PulseCheck is a **free, non-commercial research and educational tool**. There are no charges, paid tiers, subscriptions, payments, or advertising. Usage is limited by rate limits and caps, not by price (UP-2). The service is **not offered in blocked jurisdictions** (LG-13). This decision replaces the paid-service model in v2.2.
 
-### 29.2 Commercial placeholders (to be completed before launch)
+Copy may describe PulseCheck as free, but must not promise unlimited, guaranteed, or permanent availability.
+
+### 29.2 Placeholders (to be completed before launch)
 
 | Item | Value |
 |---|---|
-| Pricing model (per analysis, credit pack, or subscription) | `[TO BE DECIDED]` |
-| Price and currency | `[PRICE — TO BE COMPLETED]` |
-| Payment processor | `[TO BE CHOSEN]` |
-| Tax handling approach | `[TO BE COMPLETED with accountant]` |
-| Refund window and conditions | `[REFUND WINDOW — TO BE COMPLETED]` |
-| Whether Inconclusive results are billable | `[DECISION REQUIRED]` |
-| Business registration and tax ID | `[TO BE COMPLETED]` |
+| Daily analysis cap per visitor | `[TO BE SET after load testing]` |
+| Global daily analysis cap | `[TO BE SET after load testing]` |
+| Monthly compute budget cutoff | `[TO BE SET]` |
 | Blocked jurisdictions | `[Illinois, Texas, Washington — CONFIRM WITH COUNSEL]` |
 
 All earlier placeholders (LG-1 business details, governing law, contact details) remain in force.
 
-### 29.3 Payment requirements
+### 29.3 Free-service requirements
 
-**PAY-1: Guest checkout, no accounts.** Use the processor's hosted checkout page. The application must never receive, store, or log card numbers. Collect only an email address for the receipt (personal data, disclosed in the Privacy Policy). Link each payment to a job through an opaque order ID. Confirm payment through a server-side, signature-verified webhook, handled idempotently. Do not start analysis until payment is confirmed (or authorized, if the capture-on-completion model is chosen). Never send the video, access tokens, or result data to the payment processor.
+**FREE-1: Cost control.** Enforce per-visitor and global daily caps, a bounded queue, and a monthly compute budget. When a cap or the budget is reached, stop accepting new jobs and show a clear "PulseCheck has reached its usage limit; try again later" message. Alert the developer when spending approaches the budget.
 
-**PAY-2: Price transparency.** Show the price, currency, and any applicable taxes or fees before the visitor commits, on the upload page, Pricing page, and checkout. No hidden fees. State what one purchase includes (for example, one analysis within the stated size and duration limits).
+**FREE-2: No monetization.** Do not add payments, advertising, sponsorships, affiliate links, or sale or sharing of user data. Any change requires a PRD revision and a fresh review of every dataset license (LG-6).
 
-**PAY-3: Taxes and business setup.** Determine whether sales tax, VAT, or similar taxes apply to digital services in the places PulseCheck is offered, and use a tax-calculation tool or accountant. Confirm business formation, registration, and tax-ID requirements before taking payments.
+**FREE-3: Dataset licenses.** Research datasets such as FaceForensics++ permit only non-commercial research and educational use. Record each trained model's source dataset and license in its metadata, and credit and cite datasets on the About and Methodology pages.
 
-**PAY-4: Policy updates.** Update the Terms (pricing, payment, taxes, refunds, failed payments, chargebacks, purchasers must be adults able to contract), Privacy Policy (payment processor, receipt email, order-record retention), and Cookie Policy (checkout cookies and scripts).
+**FREE-4: Failed jobs.** When a job fails because of a service error, timeout, or capacity limit, say so plainly and let the user retry. A failed job does not count against the visitor's daily cap.
 
-**PAY-5: Refund rules and the Inconclusive result.** Implement the policy in LG-6. Decide and disclose before purchase whether Inconclusive results are billable. Because the product states that results are evidence, not proof, never offer or imply a satisfaction or accuracy guarantee that the evaluation in Section 13 does not support. Automatically refund or re-run failed jobs caused by service errors.
-
-**PAY-6: Recurring billing and credits (only if offered).** Obtain clear affirmative consent, disclose renewal terms and price changes, send reminders where required, and provide easy cancellation. Confirm whether prepaid credits or expiry dates trigger additional state requirements.
-
-**PAY-7: Receipts and order records.** Email a receipt that links to the Refund and Cancellation Policy. Keep order records only as long as tax and accounting rules require, stored separately from video and result data, and disclosed in the Privacy Policy.
-
-**PAY-8: Fraud and disputes.** Enable the processor's fraud tools, keep the rate limits in UP-2, and write a short dispute and chargeback runbook. Keep the pre-purchase terms and consent records (LG-5) as evidence.
-
-**PAY-9: Pages and analytics.** Pricing, checkout, order-confirmation, and payment-failed pages are required (DS-11). Mark checkout and confirmation pages `noindex`, and exclude order IDs, emails, and tokens from analytics URLs and events (DS-20).
-
-### 29.4 Revised user journey (paid)
+### 29.4 User journey
 
 1. Visit the site; the region check runs (LG-13). Blocked visitors see the region-unavailable page.
-2. Read the explanation, price, limits, privacy notice, and Terms.
+2. Read the explanation, limits, privacy notice, and Terms.
 3. Select a supported video and confirm the consent and location attestation (LG-5).
-4. Pay through the hosted checkout; receive an emailed receipt.
-5. After payment confirmation, the upload is analyzed and job status is shown.
-6. View results and optionally download the JSON report.
-7. Temporary video data and job artifacts expire automatically (UP-4).
-8. If the job fails because of a service error, the refund or re-run policy applies.
+4. The upload is analyzed and job status is shown.
+5. View results and optionally download the JSON report.
+6. Temporary video data and job artifacts expire automatically (UP-4).
+7. If the job fails because of a service error, the user can retry (FREE-4).
 
 ---
 
@@ -1294,7 +1272,7 @@ All earlier placeholders (LG-1 business details, governing law, contact details)
 | Cookies policy | LG-4, DS-11 |
 | Form consent | LG-5 |
 | Check cookie consent | LG-4, Section 26 |
-| Refund policy | LG-6 |
+| Refund policy | Removed in v2.3 (free tool); see LG-6 |
 | Check tracking | LG-7, Section 26 |
 | Check third-party embeds | LG-8 |
 | Fix accessibility | LG-10, DS-1 |
@@ -1329,7 +1307,7 @@ All earlier placeholders (LG-1 business details, governing law, contact details)
 | Local business schema | DS-19 |
 | Google Analytics | DS-20 |
 | Avoid availability in states where biometric law applies | LG-13, LG-11 |
-| Product is not free (paid service) | Section 29, LG-6 |
+| Product is free and non-commercial | Section 29, LG-6 |
 | Keep placeholders | LG-1, Section 29.2, LG-13 |
 
 ---
