@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pulsecheck"
+version = "0.1.0"
+description = "Experimental rPPG-based deepfake analysis"
+requires-python = ">=3.12"
+# mediapipe requires the opencv-contrib-python distribution by name, so that is
+# the only OpenCV wheel we depend on. Never install opencv-python-headless (or
+# any other OpenCV wheel) alongside it: they all write the same cv2 package.
+dependencies = [
+    "mediapipe>=1.1",
+    "numpy>=2.2",
+    "opencv-contrib-python>=4.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "matplotlib>=3.9",
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.setuptools.packages.find]
+include = ["pulsecheck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

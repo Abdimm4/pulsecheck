@@ -1,0 +1,32 @@
+# PulseCheck default configuration. Values are initial proposals from the PRD;
+# adjust after load and memory testing. Not loaded by code yet.
+
+upload:                      # UP-1
+  allowed_formats: [mp4, mov]
+  max_size_mb: 100
+  max_duration_s: 60
+
+face:                        # FR-3 (defaults mirror pulsecheck.face)
+  model: models/face_landmarker.task   # or $PULSECHECK_FACE_MODEL
+  rois: [forehead, left_cheek, right_cheek]
+  min_interocular_px: 20
+  min_roi_pixels: 30
+  min_roi_area_fraction: 0.5
+  min_face_coverage: 0.8
+  min_roi_valid_fraction: 0.8
+  max_median_jitter_iod: 0.05
+
+color_signal:                # FR-4 (defaults mirror pulsecheck.signals)
+  statistic: mean
+  max_clipped_fraction: 0.25
+
+signal:                      # FR-5
+  bandpass_hz: [0.7, 3.0]
+
+retention:                   # UP-4
+  abandoned_upload_hours: 1
+  job_metadata_hours: 24
+
+regions:                     # LG-13
+  # CONFIRM WITH COUNSEL BEFORE LAUNCH
+  blocked: [US-IL, US-TX, US-WA]

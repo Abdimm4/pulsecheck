@@ -6,3 +6,9 @@ node_modules/
 *.mov
 data/
 models/*.pkl
+# Downloaded model files (fetch with scripts/download_models.py)
+*.task
+# Python build/tool caches
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
