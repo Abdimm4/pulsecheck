@@ -1,5 +1,7 @@
 # PulseCheck default configuration. Values are initial proposals from the PRD;
-# adjust after load and memory testing. Not loaded by code yet.
+# adjust after load and memory testing. pulsecheck.config loads this file (or
+# $PULSECHECK_CONFIG); the signal, features and heuristic sections are read by
+# code, the others are not yet.
 
 upload:                      # UP-1
   allowed_formats: [mp4, mov]
@@ -20,8 +22,41 @@ color_signal:                # FR-4 (defaults mirror pulsecheck.signals)
   statistic: mean
   max_clipped_fraction: 0.25
 
-signal:                      # FR-5
-  bandpass_hz: [0.7, 3.0]
+signal:                      # FR-5 (defaults mirror pulsecheck.signals.SignalConfig)
+  bandpass_hz: [0.7, 3.0]    # roughly 42-180 bpm
+  filter_order: 4            # zero-phase Butterworth (sosfiltfilt)
+  resample_hz: null          # null: the video's median frame rate
+  max_resample_hz: 60
+  min_duration_s: 6.0        # shorter signals are rejected
+  min_sample_rate_hz: 7.5    # slower signals are rejected
+  min_valid_fraction: 0.7    # of frames with a valid ROI sample
+  max_gap_s: 2.0             # longer runs of missing samples are rejected
+  detrend: linear            # linear, constant or none
+  chrom_window_s: 1.6
+  welch_window_s: 10.0
+  spectrum_resolution_hz: 0.01
+  peak_halfwidth_hz: 0.1
+  stability_window_s: 6.0
+  stability_step_s: 1.0
+
+features:                    # FR-6
+  pulse_method: chrom        # chrom or green; the other is kept for comparison
+  quality:                   # signal-quality score ramps (uncalibrated)
+    concentration_range: [0.35, 0.75]   # spectral concentration mapped onto 0-1
+    snr_range_db: [10.0, 20.0]          # SNR proxy mapped onto 0-1
+
+heuristic:                   # FR-7 transparent baseline
+  # UNCALIBRATED: these thresholds are hand-set placeholders. They have not
+  # been fitted or evaluated on any dataset, and the score is not a
+  # probability. Revisit after Phase 4 evaluation.
+  calibrated: false
+  min_signal_quality: 0.35   # below this the result is inconclusive
+  min_usable_rois: 2
+  min_face_coverage: 0.8
+  real_threshold: 0.65       # consistency score >= this: more consistent with real
+  manipulated_threshold: 0.35  # consistency score <= this: more consistent with manipulated
+  max_freq_diff_hz: 0.3      # regional frequency gap that scores 0 agreement
+  max_window_std_hz: 0.3     # window-frequency spread that scores 0 stability
 
 retention:                   # UP-4
   abandoned_upload_hours: 1

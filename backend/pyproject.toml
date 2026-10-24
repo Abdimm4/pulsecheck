@@ -14,6 +14,9 @@ dependencies = [
     "mediapipe>=1.1",
     "numpy>=2.2",
     "opencv-contrib-python>=4.10",
+    # Pure-Python YAML parser; PyYAML has no wheel for every Python we use.
+    "ruamel.yaml>=0.18",
+    "scipy>=1.14",
 ]
 
 [project.optional-dependencies]
