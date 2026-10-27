@@ -1,0 +1,13 @@
+# Keep the build context small and free of secrets and private data.
+.git/
+.venv/
+.env
+.claude/
+data/
+models/
+**/__pycache__/
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+*.mp4
+*.mov

@@ -83,8 +83,48 @@ def iter_frames(path: str | Path, max_frames: int | None = None) -> Iterator[Fra
         cap.release()
 
 
-def probe_video(path: str | Path) -> VideoMetadata:
-    """Decode the whole video and report measured metadata."""
+@dataclass(frozen=True)
+class VideoHeader:
+    """Container-reported properties plus whether the first frame decodes."""
+
+    width: int
+    height: int
+    header_fps: float
+    header_frame_count: int
+    first_frame_decoded: bool
+
+    @property
+    def header_duration_s(self) -> float | None:
+        if self.header_fps > 0 and self.header_frame_count > 0:
+            return self.header_frame_count / self.header_fps
+        return None
+
+
+def read_header(path: str | Path) -> VideoHeader:
+    """Open the video and decode only its first frame; cheap enough to run per request.
+
+    Header values are untrusted hints; probe_video() measures the real ones.
+    """
+    cap = _open(path)
+    try:
+        ok, image = cap.read()
+        return VideoHeader(
+            width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            header_fps=float(cap.get(cv2.CAP_PROP_FPS) or 0.0),
+            header_frame_count=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+            first_frame_decoded=bool(ok and image is not None and image.size),
+        )
+    finally:
+        cap.release()
+
+
+def probe_video(path: str | Path, max_frames: int | None = None) -> VideoMetadata:
+    """Decode the whole video (or its first `max_frames` frames) and report measured metadata.
+
+    With `max_frames`, a longer video stops decoding there: callers enforcing a
+    frame limit pass the limit + 1 and reject when that many frames decoded.
+    """
     cap = _open(path)
     try:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -94,7 +134,9 @@ def probe_video(path: str | Path) -> VideoMetadata:
     finally:
         cap.release()
 
-    timestamps = np.array([f.timestamp_s for f in iter_frames(path)], dtype=float)
+    timestamps = np.array(
+        [f.timestamp_s for f in iter_frames(path, max_frames=max_frames)], dtype=float
+    )
     warnings: list[str] = []
 
     if timestamps.size == 0:

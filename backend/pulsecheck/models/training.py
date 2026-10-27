@@ -257,22 +257,25 @@ class TrainedModel:
     ) -> list[Prediction]:
         """One Prediction per row; failed rows become state 'failed'."""
         scores = self.scores(rows)
-        gate = self.gate
         out = []
         for row, score in zip(rows, scores, strict=True):
+            state, reason = self.decide(row, float(score))
             forced = int(score >= self.threshold)
-            reason = gate.reason(row) if gate else None
-            if reason:
-                state = INCONCLUSIVE_STATE
-            elif score >= self.threshold + self.margin - 1e-9:
-                state = FAKE_STATE
-            elif score <= self.threshold - self.margin + 1e-9:
-                state = REAL_STATE
-            else:
-                state, reason = INCONCLUSIVE_STATE, "score_in_inconclusive_band"
-            out.append(_prediction(row, state, float(score), forced, reason or ""))
+            out.append(_prediction(row, state, float(score), forced, reason))
         out.extend(_prediction(r, FAILED, None, None, r["failure_reason"]) for r in failed)
         return out
+
+    def decide(self, row: Mapping[str, str], score: float) -> tuple[str, str]:
+        """Result state and inconclusive reason ('' if decided) for one scored row."""
+        gate = self.gate
+        reason = gate.reason(row) if gate else None
+        if reason:
+            return INCONCLUSIVE_STATE, reason
+        if score >= self.threshold + self.margin - 1e-9:
+            return FAKE_STATE, ""
+        if score <= self.threshold - self.margin + 1e-9:
+            return REAL_STATE, ""
+        return INCONCLUSIVE_STATE, "score_in_inconclusive_band"
 
     def save(self, path: str | Path) -> tuple[Path, Path]:
         path = Path(path).with_suffix(".pkl")

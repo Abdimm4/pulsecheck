@@ -1,12 +1,30 @@
 # PulseCheck default configuration. Values are initial proposals from the PRD;
 # adjust after load and memory testing. pulsecheck.config loads this file (or
-# $PULSECHECK_CONFIG); the signal, features and heuristic sections are read by
-# code, the others are not yet.
+# $PULSECHECK_CONFIG). Every section is read by code except face, color_signal
+# and regions, which only document the code defaults for now.
 
-upload:                      # UP-1
-  allowed_formats: [mp4, mov]
+upload:                      # UP-1 (pulsecheck.jobs.validation.UploadLimits)
+  allowed_formats: [mp4, mov]  # checked from the file's bytes, not its name or MIME type
   max_size_mb: 100
   max_duration_s: 60
+  max_resolution: [1920, 1080] # long side x short side, either orientation
+  max_frames: 3600             # decoded frames (60 s at 60 fps)
+
+capacity:                    # UP-2 (pulsecheck.jobs.settings.CapacityConfig)
+  max_queue_length: 20         # queued analyses; new jobs get 503 "service busy" beyond it
+  max_active_jobs: 50          # unfinished jobs (created..processing) across all visitors
+  max_active_jobs_per_client: 2
+  job_creations_per_window: 10 # per client (salted IP hash) per window
+  rate_window_s: 3600
+  job_timeout_s: 300           # worker time limit per analysis
+  retry_after_s: 60            # Retry-After sent with 503 and 429
+
+storage:                     # UP-3 (pulsecheck.storage)
+  backend: local               # local only for now; S3/R2 presigned uploads in Phase 7
+  local_dir: data/storage      # or $PULSECHECK_STORAGE_DIR; relative to the repo root
+
+analysis:                    # worker pipeline (pulsecheck.jobs.pipeline)
+  model_path: null             # trained .pkl (or $PULSECHECK_MODEL_PATH); null = heuristic
 
 face:                        # FR-3 (defaults mirror pulsecheck.face)
   model: models/face_landmarker.task   # or $PULSECHECK_FACE_MODEL
@@ -58,9 +76,10 @@ heuristic:                   # FR-7 transparent baseline
   max_freq_diff_hz: 0.3      # regional frequency gap that scores 0 agreement
   max_window_std_hz: 0.3     # window-frequency spread that scores 0 stability
 
-retention:                   # UP-4
-  abandoned_upload_hours: 1
-  job_metadata_hours: 24
+retention:                   # UP-4 (pulsecheck.jobs.settings.RetentionConfig)
+  abandoned_upload_hours: 1    # jobs not queued by then expire; their upload is deleted
+  job_metadata_hours: 24       # results, reports and job metadata expire this long after creation
+  expired_record_hours: 168    # data-free "expired" records kept so owners see the status
 
 regions:                     # LG-13
   # CONFIRM WITH COUNSEL BEFORE LAUNCH

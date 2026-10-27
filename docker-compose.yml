@@ -1,0 +1,59 @@
+# Local stack: PostgreSQL, Redis, API, worker and cleanup. Run with
+# `docker compose up --build`; for local development without Docker see
+# README "API and worker". Secrets come from .env (copy .env.example).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pulsecheck
+      POSTGRES_DB: pulsecheck
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsecheck"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", "", "--appendonly", "no"]  # queue only; no persistence
+
+  api:
+    build: { context: ., dockerfile: worker/Dockerfile }
+    command: >
+      sh -c "cd backend && alembic upgrade head && cd .. &&
+             uvicorn --factory pulsecheck.api.app:create_app --host 0.0.0.0 --port 8000"
+    env_file: .env
+    environment: &service-env
+      DATABASE_URL: postgresql+psycopg://pulsecheck:${POSTGRES_PASSWORD}@postgres:5432/pulsecheck
+      REDIS_URL: redis://redis:6379/0
+      PULSECHECK_STORAGE_DIR: /app/data/storage
+    ports: ["8000:8000"]
+    volumes: [uploads:/app/data/storage]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  worker:
+    build: { context: ., dockerfile: worker/Dockerfile }
+    command: ["python", "worker/entrypoint.py", "worker"]
+    env_file: .env
+    environment: *service-env
+    volumes: [uploads:/app/data/storage]
+    depends_on: [api]
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 2g }
+
+  cleanup:
+    build: { context: ., dockerfile: worker/Dockerfile }
+    command: ["python", "worker/entrypoint.py", "cleanup", "--loop", "300"]
+    env_file: .env
+    environment: *service-env
+    volumes: [uploads:/app/data/storage]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  uploads:

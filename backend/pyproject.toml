@@ -22,7 +22,28 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The web service: API, job database, queue and worker (Phase 5). The research
+# pipeline and scripts do not need these.
+api = [
+    "alembic>=1.14",
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    # Redis client and RQ queue; the worker is RQ's SimpleWorker (no fork, runs on Windows).
+    "redis>=5.2",
+    "rq>=2.1",
+    "sqlalchemy>=2.0.36",
+    "uvicorn>=0.32",
+]
+# PostgreSQL driver for deployments (DATABASE_URL=postgresql+psycopg://...).
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 dev = [
+    "pulsecheck[api]",
+    # In-memory Redis so API and worker tests need no Redis server.
+    "fakeredis>=2.26",
+    # FastAPI's TestClient.
+    "httpx>=0.27",
     "matplotlib>=3.9",
     "pytest>=8",
     "ruff>=0.8",
@@ -31,8 +52,15 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["pulsecheck*"]
 
+[tool.setuptools.package-data]
+"pulsecheck.jobs" = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Starlette suggests httpx2 for its TestClient; httpx still works.
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
 
 [tool.ruff]
 line-length = 100
