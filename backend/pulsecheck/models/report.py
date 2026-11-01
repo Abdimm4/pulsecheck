@@ -302,7 +302,7 @@ def shortcut_markdown(section: Mapping, methods: Mapping[str, Mapping]) -> list[
     lines = [
         "## Shortcut baseline",
         "",
-        "Does each pulse (or pulse + shortcut, \"combined\") model beat a model trained on "
+        'Does each pulse (or pulse + shortcut, "combined") model beat a model trained on '
         "non-physiological media properties only? ROC-AUC differences use the videos both "
         "models scored, with a paired group-level bootstrap interval.",
         "",
@@ -322,6 +322,7 @@ def shortcut_markdown(section: Mapping, methods: Mapping[str, Mapping]) -> list[
         )
     lines.append("")
     for v in section["verdicts"]:
+
         def word(flag) -> str:
             return "not evaluated" if flag is None else ("yes" if flag else "no")
 

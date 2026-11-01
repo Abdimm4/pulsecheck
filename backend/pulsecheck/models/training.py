@@ -236,9 +236,7 @@ def labels(rows: Sequence[Mapping[str, str]]) -> np.ndarray:
     return np.array([r["label"] == "fake" for r in rows], dtype=int)
 
 
-def load_table(
-    path: str | Path, extra: Mapping[str, Mapping[str, str]] | None = None
-) -> TableData:
+def load_table(path: str | Path, extra: Mapping[str, Mapping[str, str]] | None = None) -> TableData:
     """Read the table, check leakage over every assigned row, group rows by split.
 
     `extra` (video_id -> columns, e.g. from a manifest or media table) is
@@ -553,9 +551,7 @@ def train_family_cv(
     if len(np.unique(folds)) < 2:
         raise ValueError("cross-validation needs at least two cv_fold values")
     names = config.candidate_features
-    used, dropped = select_features(
-        feature_matrix(rows, names), names, config.max_missing_fraction
-    )
+    used, dropped = select_features(feature_matrix(rows, names), names, config.max_missing_fraction)
     if not used:
         raise ValueError("no feature has enough training values")
     x = feature_matrix(rows, used)

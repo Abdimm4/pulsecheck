@@ -151,11 +151,15 @@ def _write(path: Path, frames: list[np.ndarray], config: NormalizeConfig) -> Non
                 macro_block_size=1,
                 ffmpeg_log_level="error",
                 output_params=[
-                    "-crf", str(config.crf),
-                    "-preset", config.preset,
-                    "-threads", "1",
+                    "-crf",
+                    str(config.crf),
+                    "-preset",
+                    config.preset,
+                    "-threads",
+                    "1",
                     "-an",
-                    "-map_metadata", "-1",
+                    "-map_metadata",
+                    "-1",
                 ],
             )
             writer.send(None)

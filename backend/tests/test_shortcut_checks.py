@@ -73,9 +73,7 @@ def shortcut_setup(tmp_path_factory):
     provenance = provenance_from_table(table)
     paths = []
     for feature_set in ("pulse", "shortcut", "combined"):
-        config = TrainConfig(
-            n_boot=20, forest_trees=30, quality_gate=None, feature_set=feature_set
-        )
+        config = TrainConfig(n_boot=20, forest_trees=30, quality_gate=None, feature_set=feature_set)
         for model in train_models(data, config, provenance):
             name = model.sidecar["model_name"]
             paths.append(model.save(folder / "models" / f"{name}.pkl")[0])

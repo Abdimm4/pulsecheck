@@ -273,9 +273,7 @@ def assign_folds(rows: list[ManifestRow], options: NfiOptions) -> list[ManifestR
         if fold == 0:
             out.append(replace(row, split="test", cv_fold="", group_id=f"link:{group}"))
         else:
-            out.append(
-                replace(row, split="train", cv_fold=str(fold - 1), group_id=f"link:{group}")
-            )
+            out.append(replace(row, split="train", cv_fold=str(fold - 1), group_id=f"link:{group}"))
     return out
 
 
