@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **Version** | 2.3 (PulseCheck is now a free, non-commercial tool; all payment, pricing, and refund requirements removed) |
-| **Date** | October 24, 2026 |
+| **Version** | 2.4 (shortcut-check findings: source/compression confound requirements, FR-12 pulse extraction validation, Phase 5A; v2.3 made PulseCheck free and non-commercial) |
+| **Date** | November 1, 2026 |
 | **Product owner** | Solo developer |
 | **Product type** | Public web application / computer-vision research tool |
 | **Release model** | Free, non-commercial video analysis with no accounts, rate-limited, automatic deletion, not offered in restricted jurisdictions |
@@ -36,6 +36,7 @@ These are planning estimates, not guarantees. Dataset access, model quality, dep
 | Face regions and signal extraction | 10–16 hours | Weeks 1–2 |
 | Signal processing, features, tests | 10–18 hours | Weeks 2–3 |
 | Baseline classifier and evaluation | 10–18 hours | Weeks 3–4 |
+| Pulse extraction validation and improvement (Phase 5A, added in v2.4) | 15–30 hours | After Phase 5 |
 | FastAPI service and job lifecycle | 8–14 hours | Weeks 4–5 |
 | React interface and result charts | 12–22 hours | Weeks 5–7 |
 | Private storage, queue, rate limits, deletion | 8–16 hours | Weeks 7–8 |
@@ -352,6 +353,8 @@ For each valid frame and ROI:
 
 Start with green-channel extraction as a simple baseline, then compare it with a chrominance-based rPPG method if time allows.
 
+v2.4: extraction quality must be measured against known or ground-truth heart rate before any classifier result is interpreted (FR-12). On FaceForensics++ c23 and NFI-rPPG the current pipeline rarely recovers a clear pulse even from real videos (median per-ROI SNR about 9 dB on real NFI clips, below the quality ramp's 10 dB floor; the default quality gate passes about 0.1–0.2% of FF++ videos), so improving FR-4/FR-5 is the priority over classifier work.
+
 ### FR-5: Signal processing
 
 - Handle missing frames and nonuniform timestamps.
@@ -377,6 +380,8 @@ Possible features:
 - signal-quality score.
 
 Features must be robust to invalid inputs and document missing values.
+
+v2.4: tracking/coverage features (face coverage, per-ROI tracking coverage, all-ROIs-valid fraction, usable ROI count) feed the quality gate only, not the trained classifiers, because they depend on resolution and compression and carry source shortcuts. Every classifier feature must be checked with the confound audit (Section 13) for dependence on non-physiological media properties such as clip duration.
 
 ### FR-7: Classification
 
@@ -441,6 +446,16 @@ Exclude original video bytes, unnecessary personal information, and secret acces
 Provide a CLI to process a labeled manifest and export per-video predictions plus aggregate metrics. Record failures without silently dropping them.
 
 ---
+
+### FR-12: Pulse extraction validation (added in v2.4)
+
+Before trained-classifier results are interpreted, show that the pipeline recovers a pulse:
+
+1. **Semi-synthetic benchmark.** Inject a known pulse (heart rate, amplitude, waveform) into the skin pixels of real videos, re-encode at several compression levels, and measure heart-rate error, detection rate and SNR against amplitude, compression, resolution and motion. This needs no new dataset, and a small version runs in the test suite.
+2. **Ground-truth video benchmark.** Where licensing allows, evaluate on a dataset with contact-PPG ground truth (for example UBFC-rPPG) and report heart-rate MAE/RMSE and the fraction of clips within ±5 bpm, alongside the unsupervised baselines (green, CHROM, POS) run through the same pipeline.
+3. **Method selection on the benchmarks only.** Choose ROI definition, pulse method, detrending and windowing on the benchmarks' development data, never on deepfake test data.
+4. **Recalibrate the quality ramps** (SNR, spectral concentration) from benchmark results instead of synthetic white noise.
+5. **Then** re-extract deepfake features and rerun the shortcut-baseline evaluation (Section 13).
 
 ## 12. API Design
 
@@ -515,7 +530,33 @@ Report:
 - inconclusive rate and coverage;
 - runtime and failure rate.
 
+- ROC-AUC differences against a shortcut baseline (see below).
+
 A target accuracy is not a release requirement until a defensible evaluation protocol is established. Honest, reproducible metrics matter more than matching a historical headline result.
+
+### Source and compression confounds (added in v2.4)
+
+Real and fake videos from different sources can be separated by resolution, bitrate, frame rate, duration or brightness alone. Every evaluation must therefore:
+
+- record non-physiological media properties per video (`scripts/probe_media.py`);
+- train a **shortcut baseline** on those properties only, and a **combined** model (pulse + shortcut), with the same split, gate and model selection as the pulse model;
+- report pulse − shortcut and combined − shortcut ROC-AUC with paired group-bootstrap 95% intervals. **A pulse claim requires both differences above 0 with their intervals;**
+- run the confound audit (`scripts/audit_confounds.py`): per-column shortcut AUCs, and each classifier feature's correlation and cross-validated R² against the media properties;
+- for datasets with a strong shortcut, either normalise the videos (fixed face-centred crop, frame rate, duration, brightness and encoder settings; `scripts/normalize_videos.py`) and rerun, or mark the dataset as confounded and do not use it for claims.
+
+Findings as of November 1, 2026 (test ROC-AUC, gate off, ranges over logistic regression and random forest):
+
+| Dataset | Shortcut | Pulse | Combined | Verdict |
+|---|---|---|---|---|
+| NFI-rPPG, original | 0.832–1.000 | 0.679–0.714 | not run | Confounded: real clips are all ≤500 px tall, fakes median 720 px; height, width and bitrate each separate real from fake at ~0.81 |
+| NFI-rPPG, normalised | 0.534–0.551 | 0.503–0.604 | 0.540–0.559 | Shortcut removed; pulse also near chance; 82 test videos in 14 groups, so intervals are wide |
+| FaceForensics++ c23 | 0.557–0.597 | 0.576–0.581 | 0.596–0.608 | Criterion not met (only logistic regression combined − shortcut is above 0: +0.039 [0.004, 0.072]) |
+
+Neither dataset shows pulse signal beyond the shortcut, and the earlier NFI pulse scores were mostly the shortcut. FR-12 comes before further classifier work.
+
+### Test-split discipline
+
+Each test split has already been scored more than once (NFI-rPPG: three evaluations including the normalised copy; FaceForensics++ c23: two). Further development decisions must use validation or cross-validation only. The next test evaluation of each dataset is reserved for the Phase 5A exit, and reports must list prior test evaluations of the same split.
 
 ---
 
@@ -691,6 +732,20 @@ Keep videos, secrets, environment files, and large model/data files out of Git. 
 
 **Exit criterion:** a test client can submit a job and retrieve its status/result securely.
 
+### Phase 5A — Pulse extraction validation and improvement (added in v2.4)
+
+Shortcut checks after Phase 5 showed that the pulse features add nothing beyond media properties on FaceForensics++ c23 or normalised NFI-rPPG, and that the pipeline rarely recovers a clear pulse from real compressed videos. This phase implements FR-12.
+
+- Build the semi-synthetic injection benchmark (amplitude × compression × resolution × motion) and a ground-truth dataset loader (UBFC-rPPG or similar, once access is granted).
+- Add per-clip diagnostics: skin pixels per ROI, motion, compression level, per-ROI SNR.
+- Compare and tune extraction variants on the benchmarks: green, CHROM, POS; larger or skin-segmented ROIs; landmark smoothing and motion handling; detrending and windowing.
+- Recalibrate the quality ramps from benchmark results.
+- Re-extract FaceForensics++ c23 and normalised NFI-rPPG with the selected pipeline, retrain pulse, shortcut and combined models with selection on validation only, and score each test split once with the shortcut baseline.
+
+**Exit criterion:** the benchmark report documents heart-rate recovery (fraction within ±5 bpm, MAE) by amplitude and compression for the current and the selected pipeline, and the selected pipeline is a documented improvement at realistic amplitude and c23-like compression; ground-truth results are reported if a dataset is available; and the deepfake reports state whether the shortcut-baseline criterion is met. A negative result is an acceptable, documented outcome.
+
+Phase 6 can proceed in parallel. Phase 8 must not publish accuracy claims until Phase 5A exits.
+
 ### Phase 6 — React frontend (Weeks 5–7)
 
 - Build upload, progress, results, methodology, and privacy pages.
@@ -755,6 +810,10 @@ Use environment variables or a secrets manager for credentials. Do not commit se
 | Free compute is abused or hosting costs run away | Rate limits, daily caps, bounded queue, monthly budget cutoff, cost alerts (UP-2) |
 | Restricted-region users bypass geo-blocking | Server-side checks, attestation, Terms prohibition, counsel review |
 | Research-only dataset terms conflict with the project | Keep PulseCheck non-commercial; record dataset license on every trained model (Section 29) |
+| Classifier learns source/compression differences instead of pulse (observed on NFI-rPPG, v2.4) | Shortcut baseline and combined model in every report; confound audit; video normalisation; claims only when pulse beats the shortcut (Section 13) |
+| Pulse not recoverable from compressed web video (observed, v2.4) | FR-12 benchmarks before classifier work; quality gate and inconclusive output; a negative result is documented, not hidden |
+| Repeated test-split evaluations bias reported results | Decisions on validation/CV only; one reserved test evaluation per dataset per phase; reports list prior test evaluations |
+| Normalisation itself changes the signal | Compare pulse SNR/quality before and after on the same clips (unchanged in v2.4: real-clip forehead SNR median 8.98 → 8.77 dB); record settings in the manifest sidecar |
 
 ---
 
@@ -767,6 +826,9 @@ Use environment variables or a secrets manager for credentials. Do not commit se
 - [ ] Baseline and at least one ML model are compared.
 - [ ] Evaluation uses a documented held-out split and avoids obvious leakage.
 - [ ] Results include multiple metrics and known failure cases.
+- [ ] Pulse extraction is validated against known or ground-truth heart rate (FR-12).
+- [ ] Every reported classifier result includes the shortcut baseline and combined model, and states whether the pulse-claim criterion is met.
+- [ ] Known issues and findings are documented in the README.
 
 ### Public product
 
@@ -825,6 +887,8 @@ Add measured metrics only after you have verified them. Do not claim a particula
 8. Add queue, private storage, temporary access, rate limits, and deletion.
 9. Deploy to staging and verify end-to-end behavior.
 10. Open the public beta only after privacy and resource-limit tests pass.
+
+v2.4 status (November 1, 2026): steps 1–6 and the queue/storage parts of step 8 are done locally (Phases 1–5 plus shortcut checks). The next research step is Phase 5A (FR-12): validate and improve pulse extraction before any further classifier work. Phase 6 (frontend) may proceed in parallel.
 
 ---
 
@@ -1150,6 +1214,8 @@ PulseCheck has no customers, so "case studies" are **documented analyses of perm
 
 | Earlier requirement | Conflict or interaction | Resolution |
 |---|---|---|
+| FR-6: tracking coverage listed as a feature | v2.4: coverage features carry source/compression shortcuts | Coverage features feed the quality gate only; classifiers use the pulse subset (FR-6) |
+| Section 13: target accuracy deferred | v2.4: no dataset shows pulse signal beyond the shortcut | Accuracy claims also require the shortcut-baseline criterion; Phase 5A exits before Phase 8 claims |
 | v2.2: paid service, checkout, refunds | v2.3: product is free and non-commercial | Payments removed (Section 29); LG-6 now covers non-commercial status and dataset licenses |
 | UP-5: tokens must stay out of analytics/logs | Google Analytics requested | DS-20: sanitize URLs; consent first |
 | UP-2: IP-based rate limiting | Privacy/tracking | Disclose IP use and log retention in Privacy Policy; minimal retention |

@@ -20,6 +20,11 @@ See [PulseCheck_PRD.md](PulseCheck_PRD.md) for the full requirements.
   (`pulsecheck.jobs`), private upload storage (`pulsecheck.storage`), a Redis/RQ worker
   that runs the real pipeline (`worker/entrypoint.py`), JSON reports (`pulsecheck.reporting`)
   and expiry/cleanup. See [API and worker](#api-and-worker).
+- Shortcut checks: media probing, shortcut/combined baselines, a confound audit and video
+  normalisation (`pulsecheck.dataset.media`, `.confounds`, `.normalize`). Result: no dataset
+  shows pulse signal beyond the shortcut. See [Known issues and findings](#known-issues-and-findings).
+- Next: Phase 5A, validating and improving pulse extraction against known heart rate
+  (PRD FR-12).
 
 ## Backend setup
 
@@ -166,6 +171,78 @@ python scripts/audit_confounds.py data/features/ffpp_c23.csv \
   data: keep them under `data/` and do not share them.
 
 Keep videos and datasets out of Git (see `.gitignore`).
+
+## Known issues and findings
+
+Recorded on 2026-11-01 from the shortcut checks. Reports are under `data/reports/` (not in
+Git). Test ROC-AUC values are for logistic regression and random forest with the quality
+gate off.
+
+**Results**
+
+1. **NFI-rPPG is confounded by source.** All real clips are at most 500 px tall (median
+   856x500, ~975 kbps); fakes have a median of 1280x720 and ~1980 kbps. Height, width and bitrate
+   each separate real from fake at AUC ~0.81 on train. A forest on media properties alone
+   scored 1.000 test ROC-AUC, against 0.68-0.71 for the pulse models, so those pulse scores
+   were mostly the shortcut.
+2. **Pulse features do not beat the shortcut on any dataset.** FF++ c23: shortcut
+   0.557-0.597, pulse 0.576-0.581, combined 0.596-0.608. Only logreg combined - shortcut is
+   above 0 (+0.039 [0.004, 0.072]), so the criterion is not met. Normalised NFI: shortcut
+   0.534-0.551, pulse 0.503-0.604, combined 0.540-0.559, with no difference above 0.
+3. **The pipeline barely recovers a pulse, even from real videos.** On real NFI clips the median
+   per-ROI SNR is ~9 dB, below the quality ramp's 10 dB floor, and median `signal_quality`
+   is ~0. On FF++ the default quality gate decides only ~0.1-0.2% of videos, so all
+   comparisons use `--gate off`. This is the main open problem (PRD Phase 5A).
+4. **Normalising NFI did not damage the signal.** On the same clips before and after, the
+   real-clip forehead SNR median went from 8.98 to 8.77 dB. Cross-ROI correlation on fakes fell
+   from 0.225 to 0.150, which fits it having carried part of the shortcut.
+
+**Confounds still present**
+
+5. **Tracking/coverage features carried the shortcut.** They depend on resolution and
+   compression. They now feed the quality gate only, and classifiers use 31 features instead
+   of 37 (`pulse-full` keeps the old set, model version 0.1.0).
+6. **Clip duration leaks into pulse features on FF++.** The per-ROI `snr_db`,
+   `mean_window_freq_std_hz` and `signal_quality` correlate with duration (|rho| 0.34-0.40),
+   since longer clips average more. FF++ fakes are slightly shorter (duration AUC 0.44). These
+   features are still in the classifier set but flagged by the audit.
+7. **Residual brightness and bitrate differences in normalised NFI.** Whole-frame brightness
+   still separates real from fake at 0.71 and bitrate at 0.61. In train cross-validation the
+   shortcut model still reaches 0.72-0.75.
+
+**Normalisation caveats**
+
+8. **The first normalisation run clipped skin.** It set the brightness gain on the whole frame,
+   which clipped the skin on clips with dark backgrounds, so ROIs were rejected. The gain is now
+   measured on the face and capped so bright skin doesn't saturate (the cap applied to 299 of 500
+   clips). The cap is why issue 7 remains.
+9. **13 of 500 NFI clips fail normalisation:** 6 are shorter than 8 s and 7 have no detectable
+   face (their original face coverage was already ~0). They stay in `nfi_norm.csv`, but
+   extraction reports them as `file_not_found`. The real reason is only in the manifest
+   sidecar. That's misleading and should be fixed.
+10. **Frame rate resampling repeats the nearest frame.** 24 fps sources therefore repeat about
+    one frame in five at 30 fps.
+11. **The fixed 8 s length** keeps every fake and loses 6 real clips (10 s would lose 53). At
+    8 s the Welch spectrum is a single window and the 6 s stability window yields only 3
+    windows.
+
+**Evaluation caveats**
+
+12. **The NFI test split is small:** 82 videos in 14 groups, so the 95% intervals are wide
+    (e.g. shortcut logreg [0.358, 0.766]).
+13. **The test splits have been reused.** NFI test has been scored three times (default gate,
+    gate off + shortcut, normalised) and FF++ c23 twice. From here on, decisions use
+    validation/CV only, and each test split is reserved for one evaluation at the Phase 5A exit.
+14. **The heuristic baseline is degenerate on NFI.** With the gate off it labels every decided
+    video as manipulated (specificity 0.000).
+
+**Environment and data**
+
+15. **No system ffmpeg.** `normalize_videos.py` uses `imageio-ffmpeg` (a dev extra, bundled
+    ffmpeg 7.1, libx264 CRF 23). Without it, it falls back to OpenCV's mp4v writer, which uses
+    different encoder settings.
+16. **The NFI license is unstated.** The real clips derive from Celeb-DF (non-commercial research
+    terms). Treat all NFI-derived data as non-commercial and do not share it.
 
 ## API and worker
 
