@@ -44,6 +44,9 @@ dev = [
     "fakeredis>=2.26",
     # FastAPI's TestClient.
     "httpx>=0.27",
+    # Bundled ffmpeg binary for scripts/normalize_videos.py (libx264 re-encodes);
+    # without it the script falls back to OpenCV's mp4v writer.
+    "imageio-ffmpeg>=0.5",
     "matplotlib>=3.9",
     "pytest>=8",
     "ruff>=0.8",

@@ -21,12 +21,14 @@ from pathlib import Path
 from pulsecheck.dataset import LeakageError, write_manifest
 from pulsecheck.dataset.ffpp import METHODS, ManifestOptions, build_manifest
 from pulsecheck.dataset.manifest import manifest_counts
+from pulsecheck.dataset.nfi import N_FOLDS, NfiOptions, build_nfi_manifest
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("root", type=Path, help="FF++ download root")
-    parser.add_argument("--out", type=Path, default=Path("data/manifests/ffpp_c23.csv"))
+    parser.add_argument("root", type=Path, help="dataset download root")
+    parser.add_argument("--dataset", default="ffpp", choices=("ffpp", "nfi"))
+    parser.add_argument("--out", type=Path, help="default data/manifests/<dataset>.csv")
     parser.add_argument("--compression", default="c23", choices=("raw", "c23", "c40"))
     parser.add_argument(
         "--methods",
@@ -47,7 +49,13 @@ def main() -> int:
         "--balance", action="store_true", help="downsample fakes to the real count in each split"
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--folds", type=int, default=N_FOLDS, help=f"NFI: CV folds in train (default {N_FOLDS})"
+    )
     args = parser.parse_args()
+    if args.dataset == "nfi":
+        return build_nfi(args)
+    args.out = args.out or Path(f"data/manifests/ffpp_{args.compression}.csv")
 
     options = ManifestOptions(
         compression=args.compression,
@@ -77,6 +85,28 @@ def main() -> int:
         print(f"  {split}: {counts} source groups before sampling")
     for split, counts in manifest_counts(result.rows).items():
         print(f"  {split}: real {counts.get('real', 0)}, fake {counts.get('fake', 0)}")
+    return 0
+
+
+def build_nfi(args: argparse.Namespace) -> int:
+    out = args.out or Path("data/manifests/nfi.csv")
+    try:
+        result = build_nfi_manifest(args.root, NfiOptions(n_folds=args.folds, seed=args.seed))
+    except LeakageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    sidecar = write_manifest(result.rows, out, result.meta)
+    for warning in result.warnings[:20]:
+        print(f"warning: {warning}", file=sys.stderr)
+    print(f"{len(result.rows)} videos -> {out} (sidecar {sidecar.name})")
+    groups = result.meta["groups"]
+    print(f"  linked groups per split: {groups['splits']['groups_per_split']}")
+    print(f"  linked groups per CV fold: {groups['cv_folds']['groups_per_split']}")
+    for fold, counts in result.meta["fold_counts"].items():
+        print(f"  {fold}: {counts}")
     return 0
 
 

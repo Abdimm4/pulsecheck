@@ -49,6 +49,9 @@ class ManifestRow:
     source_video_id: str = ""  # the second video a manipulation draws on, if any
     group_id: str = ""  # split group key (informational; check_leakage recomputes)
     compression: str = ""
+    fake_family: str = ""  # coarse kind of fake (e.g. face_swap, synthetic) or real
+    cv_fold: str = ""  # cross-validation fold within the train split, if the dataset uses CV
+    attributes: str = ""  # JSON object of per-video annotations, if any
 
     def __post_init__(self) -> None:
         if self.label not in LABELS:
@@ -63,6 +66,8 @@ class ManifestRow:
 
 
 MANIFEST_FIELDS = tuple(f.name for f in fields(ManifestRow))
+# Columns older manifests may lack; they read back as empty.
+OPTIONAL_FIELDS = ("fake_family", "cv_fold", "attributes")
 
 
 def file_sha256(path: str | Path) -> str:
@@ -101,10 +106,12 @@ def write_manifest(rows: Iterable[ManifestRow], path: str | Path, meta: Mapping)
 def read_manifest(path: str | Path) -> list[ManifestRow]:
     with Path(path).open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        missing = set(MANIFEST_FIELDS) - set(reader.fieldnames or ())
+        present = set(reader.fieldnames or ())
+        missing = set(MANIFEST_FIELDS) - present - set(OPTIONAL_FIELDS)
         if missing:
             raise ValueError(f"manifest {path} lacks columns {sorted(missing)}")
-        return [ManifestRow(**{k: row[k] for k in MANIFEST_FIELDS}) for row in reader]
+        names = [k for k in MANIFEST_FIELDS if k in present]
+        return [ManifestRow(**{k: row[k] for k in names}) for row in reader]
 
 
 def read_sidecar(path: str | Path) -> dict:

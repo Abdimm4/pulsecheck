@@ -13,7 +13,19 @@ indicators). Protocol:
   threshold (Youden's J on validation) and a symmetric inconclusive band
   around it (the widest band that keeps validation coverage at or above
   `min_val_coverage`) are fitted on validation;
+- small datasets can instead use grouped cross-validation inside the train
+  split (`train_family_cv`, rows carry a `cv_fold`): hyperparameters, the
+  threshold and the band are chosen on pooled out-of-fold scores, then the
+  chosen pipeline is refitted on the whole train split;
 - the test split is never touched here; scripts/evaluate.py scores it once.
+
+Feature sets (FEATURE_SETS, `TrainConfig.features`): "pulse" (the default)
+uses PULSE_CLASSIFIER_FEATURES, i.e. every table feature except the tracking
+and coverage ones, which depend on resolution and compression and stay with
+the quality gate; "shortcut" uses only non-physiological media properties
+(pulsecheck.dataset.media); "combined" uses both, to test whether the pulse
+features add anything over the shortcut; "pulse-full" is every table feature
+(the model 0.1.0 default).
 
 Scores are the classifier's fake-class output. They are not calibrated
 probabilities, and the states describe consistency with the training data,
@@ -31,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -38,15 +51,23 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from pulsecheck import __version__
-from pulsecheck.dataset.manifest import SPLITS, check_leakage, file_sha256, read_sidecar
+from pulsecheck.dataset.manifest import (
+    SPLITS,
+    SplitRecord,
+    check_leakage,
+    file_sha256,
+    read_sidecar,
+)
+from pulsecheck.dataset.media import SHORTCUT_FEATURES
 from pulsecheck.dataset.table import (
     STATUS_FAILED,
     STATUS_OK,
+    attach_columns,
     parse_float,
     read_table,
     split_records,
 )
-from pulsecheck.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
+from pulsecheck.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, PULSE_CLASSIFIER_FEATURES
 from pulsecheck.models.evaluation import (
     FAILED,
     FAKE_STATE,
@@ -57,13 +78,20 @@ from pulsecheck.models.evaluation import (
     safe_auc,
 )
 
-MODEL_VERSION = "0.1.0"
+# 0.2.0: the default "pulse" feature set leaves out tracking/coverage features.
+MODEL_VERSION = "0.2.0"
 FAMILIES = ("logreg", "forest")
 PROJECT_STATUS = (
     "PulseCheck is a free, non-commercial research and educational project "
     "(PRD v2.3 Section 29, LG-6). Models trained on non-commercial datasets must "
     "not be used commercially."
 )
+FEATURE_SETS = {
+    "pulse": PULSE_CLASSIFIER_FEATURES,
+    "shortcut": SHORTCUT_FEATURES,
+    "combined": (*PULSE_CLASSIFIER_FEATURES, *SHORTCUT_FEATURES),
+    "pulse-full": FEATURE_NAMES,
+}
 SCORE_SEMANTICS = (
     "Classifier output for the manipulated class, higher = more consistent with the "
     "manipulated training examples. Not a calibrated probability."
@@ -94,6 +122,21 @@ class QualityGate:
         return None
 
 
+def resolve_gate(spec: str, heuristic: Mapping | None) -> QualityGate | None:
+    """Quality gate from a CLI spec: "default" (the config's heuristic gate), "off", or
+    the path of a JSON file with QualityGate fields (e.g. a proposed gate)."""
+    if spec == "off":
+        return None
+    if spec == "default":
+        return QualityGate.from_heuristic(heuristic)
+    values = json.loads(Path(spec).read_text(encoding="utf-8"))
+    values = values.get("gate", values)
+    unknown = set(values) - set(asdict(QualityGate()))
+    if unknown:
+        raise ValueError(f"{spec}: unknown quality-gate settings {sorted(unknown)}")
+    return QualityGate(**values)
+
+
 @dataclass
 class TrainConfig:
     families: tuple[str, ...] = FAMILIES
@@ -104,6 +147,8 @@ class TrainConfig:
     seed: int = 0
     n_boot: int = 1000
     forest_trees: int = 300
+    features: tuple[str, ...] | None = None  # candidate features; None = FEATURE_SETS[feature_set]
+    feature_set: str = "pulse"  # name recorded in the sidecar and model name
 
     def __post_init__(self) -> None:
         unknown = set(self.families) - set(FAMILIES)
@@ -111,6 +156,14 @@ class TrainConfig:
             raise ValueError(f"unknown model families {sorted(unknown)}; known: {FAMILIES}")
         if not 0 <= self.min_val_coverage <= 1:
             raise ValueError("min_val_coverage must be in [0, 1]")
+        if not self.features and self.feature_set not in FEATURE_SETS:
+            raise ValueError(
+                f"unknown feature set {self.feature_set!r}; known: {sorted(FEATURE_SETS)}"
+            )
+
+    @property
+    def candidate_features(self) -> tuple[str, ...]:
+        return tuple(self.features) if self.features else FEATURE_SETS[self.feature_set]
 
 
 def candidate_grid(family: str, seed: int, trees: int = 300) -> list[tuple[dict, Pipeline]]:
@@ -183,9 +236,17 @@ def labels(rows: Sequence[Mapping[str, str]]) -> np.ndarray:
     return np.array([r["label"] == "fake" for r in rows], dtype=int)
 
 
-def load_table(path: str | Path) -> TableData:
-    """Read the table, check leakage over every assigned row, group rows by split."""
+def load_table(
+    path: str | Path, extra: Mapping[str, Mapping[str, str]] | None = None
+) -> TableData:
+    """Read the table, check leakage over every assigned row, group rows by split.
+
+    `extra` (video_id -> columns, e.g. from a manifest or media table) is
+    joined onto the rows first; see attach_columns.
+    """
     all_rows = read_table(path)
+    if extra:
+        all_rows = attach_columns(all_rows, extra)
     assigned = [r for r in all_rows if r["split"] in SPLITS]
     leakage = check_leakage(split_records(assigned))  # raises LeakageError
 
@@ -229,6 +290,8 @@ def choose_margin(
 class TrainedModel:
     pipeline: Pipeline
     sidecar: dict
+    # Out-of-fold predictions on the train split (CV training only; not saved).
+    oof: list[Prediction] = field(default_factory=list)
 
     @property
     def features(self) -> list[str]:
@@ -256,7 +319,15 @@ class TrainedModel:
         self, rows: Sequence[Mapping[str, str]], failed: Sequence[Mapping[str, str]] = ()
     ) -> list[Prediction]:
         """One Prediction per row; failed rows become state 'failed'."""
-        scores = self.scores(rows)
+        return self.predict_scores(rows, self.scores(rows), failed)
+
+    def predict_scores(
+        self,
+        rows: Sequence[Mapping[str, str]],
+        scores: np.ndarray,
+        failed: Sequence[Mapping[str, str]] = (),
+    ) -> list[Prediction]:
+        """Predictions from given scores (e.g. out-of-fold) with this model's decision rule."""
         out = []
         for row, score in zip(rows, scores, strict=True):
             state, reason = self.decide(row, float(score))
@@ -334,9 +405,8 @@ def train_family(
         y = data.labels(split)
         if len(np.unique(y)) < 2:
             raise ValueError(f"the {split} split needs both real and fake videos (has {len(y)})")
-    used, dropped = select_features(
-        data.matrix("train", FEATURE_NAMES), FEATURE_NAMES, config.max_missing_fraction
-    )
+    names = config.candidate_features
+    used, dropped = select_features(data.matrix("train", names), names, config.max_missing_fraction)
     if not used:
         raise ValueError("no feature has enough training values")
     x_train, y_train = data.matrix("train", used), data.labels("train")
@@ -355,48 +425,23 @@ def train_family(
 
     threshold = youden_threshold(y_val, val_score)
     margin = choose_margin(val_score, threshold, config.min_val_coverage, config.max_margin)
-    now = datetime.now(UTC)
-    sidecar = {
-        "model_name": f"{provenance.get('dataset_slug', 'dataset')}-{family}",
-        "family": family,
-        "model_version": MODEL_VERSION,
-        "pulsecheck_version": __version__,
-        "created_at": now.isoformat(timespec="seconds"),
-        "training_dataset": dict(provenance.get("training_dataset", {})),
-        "project_status": PROJECT_STATUS,
-        "data_version": dict(provenance.get("data_version", {})),
-        "features": {
-            "schema_version": FEATURE_SCHEMA_VERSION,
-            "candidates": len(FEATURE_NAMES),
-            "used": used,
-            "dropped": dropped,
-            "missing_handling": (
-                "median imputation fitted on train, plus a missing-indicator column for every "
-                "feature with missing training values"
-            ),
-        },
-        "preprocessing": [name for name, _ in pipe.steps[:-1]],
-        "hyperparameters": params,
-        "selection": {"metric": "validation ROC-AUC", "candidates": candidates},
-        "decision": {
-            "threshold": threshold,
-            "threshold_rule": "Youden's J on validation",
-            "inconclusive_margin": margin,
-            "margin_rule": (
-                f"widest symmetric band (step 0.01, max {config.max_margin}) keeping "
-                f"validation coverage >= {config.min_val_coverage}"
-            ),
-            "quality_gate": asdict(config.quality_gate) if config.quality_gate else None,
-            "score_semantics": SCORE_SEMANTICS,
-            "calibrated": False,
-        },
-        "split_sizes": {
-            s: {"ok": len(data.rows[s]), "failed": len(data.failed[s])} for s in SPLITS
-        },
-        "leakage_check": data.leakage,
-        "seed": config.seed,
-        "test_evaluations": [],
+    sidecar = _sidecar(
+        family,
+        config,
+        provenance,
+        pipe,
+        params,
+        used,
+        dropped,
+        selection={"metric": "validation ROC-AUC", "candidates": candidates},
+        threshold=threshold,
+        margin=margin,
+        fitted_on="validation",
+    )
+    sidecar["split_sizes"] = {
+        s: {"ok": len(data.rows[s]), "failed": len(data.failed[s])} for s in SPLITS
     }
+    sidecar["leakage_check"] = data.leakage
     model = TrainedModel(pipe, sidecar)
     sidecar["metrics"] = {
         split: evaluate_predictions(
@@ -412,8 +457,164 @@ def train_family(
     return model
 
 
-def train_models(data: TableData, config: TrainConfig, provenance: Mapping) -> list[TrainedModel]:
-    return [train_family(data, family, config, provenance) for family in config.families]
+def _sidecar(
+    family: str,
+    config: TrainConfig,
+    provenance: Mapping,
+    pipe: Pipeline,
+    params: dict,
+    used: list[str],
+    dropped: dict,
+    selection: dict,
+    threshold: float,
+    margin: float,
+    fitted_on: str,
+) -> dict:
+    slug = provenance.get("dataset_slug", "dataset")
+    suffix = "" if config.feature_set == "pulse" else f"-{config.feature_set}"
+    return {
+        "model_name": f"{slug}-{family}{suffix}",
+        "family": family,
+        "model_version": MODEL_VERSION,
+        "pulsecheck_version": __version__,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "training_dataset": dict(provenance.get("training_dataset", {})),
+        "project_status": PROJECT_STATUS,
+        "data_version": dict(provenance.get("data_version", {})),
+        "features": {
+            "set": config.feature_set,
+            "schema_version": FEATURE_SCHEMA_VERSION,
+            "candidates": len(config.candidate_features),
+            "candidate_names": list(config.candidate_features),
+            "used": used,
+            "dropped": dropped,
+            "missing_handling": (
+                "median imputation fitted on train, plus a missing-indicator column for every "
+                "feature with missing training values"
+            ),
+        },
+        "preprocessing": [name for name, _ in pipe.steps[:-1]],
+        "hyperparameters": params,
+        "selection": selection,
+        "decision": {
+            "threshold": threshold,
+            "threshold_rule": f"Youden's J on {fitted_on}",
+            "inconclusive_margin": margin,
+            "margin_rule": (
+                f"widest symmetric band (step 0.01, max {config.max_margin}) keeping "
+                f"{fitted_on} coverage >= {config.min_val_coverage}"
+            ),
+            "quality_gate": asdict(config.quality_gate) if config.quality_gate else None,
+            "score_semantics": SCORE_SEMANTICS,
+            "calibrated": False,
+        },
+        "seed": config.seed,
+        "test_evaluations": [],
+    }
+
+
+def check_fold_leakage(rows: Sequence[Mapping[str, str]]) -> dict:
+    """Raise LeakageError if a linked group spans CV folds (rows need `cv_fold`)."""
+    missing = [r["video_id"] for r in rows if not r.get("cv_fold")]
+    if missing:
+        raise ValueError(f"{len(missing)} train rows have no cv_fold, e.g. {missing[0]}")
+    return check_leakage(
+        [
+            SplitRecord(rec.video_id, f"fold{row['cv_fold']}", rec.links)
+            for rec, row in zip(split_records(rows), rows, strict=True)
+        ]
+    )
+
+
+def out_of_fold_scores(
+    x: np.ndarray, y: np.ndarray, folds: np.ndarray, pipe: Pipeline
+) -> np.ndarray:
+    """Score each fold with a clone of `pipe` fitted on the other folds."""
+    oof = np.full(len(y), np.nan)
+    for fold in np.unique(folds):
+        test = folds == fold
+        if len(np.unique(y[~test])) < 2:
+            raise ValueError(f"training folds without fold {fold} lack one class")
+        fitted = clone(pipe).fit(x[~test], y[~test])
+        oof[test] = fitted.predict_proba(x[test])[:, 1]
+    return oof
+
+
+def train_family_cv(
+    data: TableData, family: str, config: TrainConfig, provenance: Mapping
+) -> TrainedModel:
+    """Grouped-CV model selection on the train split, then a refit on all of it."""
+    rows, failed = data.rows["train"], data.failed["train"]
+    y = data.labels("train")
+    if len(np.unique(y)) < 2:
+        raise ValueError(f"the train split needs both real and fake videos (has {len(y)})")
+    fold_leakage = check_fold_leakage(rows)
+    folds = np.array([r["cv_fold"] for r in rows])
+    if len(np.unique(folds)) < 2:
+        raise ValueError("cross-validation needs at least two cv_fold values")
+    names = config.candidate_features
+    used, dropped = select_features(
+        feature_matrix(rows, names), names, config.max_missing_fraction
+    )
+    if not used:
+        raise ValueError("no feature has enough training values")
+    x = feature_matrix(rows, used)
+
+    candidates = []
+    best = None
+    for params, pipe in candidate_grid(family, config.seed, config.forest_trees):
+        oof = out_of_fold_scores(x, y, folds, pipe)
+        auc = safe_auc(y, oof)
+        per_fold = [safe_auc(y[folds == f], oof[folds == f]) for f in np.unique(folds)]
+        candidates.append({"params": params, "oof_roc_auc": auc, "fold_roc_auc": per_fold})
+        if best is None or (auc or 0) > (best[2] or 0) + 1e-12:
+            best = (params, pipe, auc, oof)
+    params, pipe, _, oof = best
+    threshold = youden_threshold(y, oof)
+    margin = choose_margin(oof, threshold, config.min_val_coverage, config.max_margin)
+    pipe = clone(pipe).fit(x, y)
+
+    sidecar = _sidecar(
+        family,
+        config,
+        provenance,
+        pipe,
+        params,
+        used,
+        dropped,
+        selection={
+            "metric": "pooled out-of-fold ROC-AUC (grouped CV within the train split)",
+            "folds": sorted(np.unique(folds).tolist()),
+            "candidates": candidates,
+        },
+        threshold=threshold,
+        margin=margin,
+        fitted_on="pooled out-of-fold scores",
+    )
+    sidecar["split_sizes"] = {
+        s: {"ok": len(data.rows[s]), "failed": len(data.failed[s])} for s in SPLITS
+    }
+    sidecar["leakage_check"] = {"splits": data.leakage, "cv_folds": fold_leakage}
+    model = TrainedModel(pipe, sidecar)
+    model.oof = model.predict_scores(rows, oof, failed)
+    sidecar["metrics"] = {
+        "train": evaluate_predictions(model.predict(rows, failed), config.n_boot, config.seed),
+        "cv_out_of_fold": evaluate_predictions(model.oof, config.n_boot, config.seed),
+    }
+    sidecar["metrics_conditions"] = (
+        "Train metrics are in-sample. Out-of-fold metrics come from models fitted without "
+        "each fold, but are optimistic because hyperparameters, threshold and band were "
+        "chosen on the same out-of-fold scores. Neither is a held-out estimate; see the "
+        "test evaluation report."
+    )
+    return model
+
+
+def train_models(
+    data: TableData, config: TrainConfig, provenance: Mapping, cv: bool = False
+) -> list[TrainedModel]:
+    train = train_family_cv if cv else train_family
+    return [train(data, family, config, provenance) for family in config.families]
 
 
 def provenance_from_table(path: str | Path) -> dict:
@@ -425,7 +626,7 @@ def provenance_from_table(path: str | Path) -> dict:
     meta = read_sidecar(path)
     dataset = meta.get("dataset") or {}
     name = dataset.get("dataset") or "unknown-dataset"
-    short = name.lower().replace("faceforensics++", "ffpp")
+    short = name.lower().replace("faceforensics++", "ffpp").replace("nfi-rppg", "nfi")
     slug = "-".join(x for x in (short, dataset.get("compression")) if x)
     return {
         "dataset_slug": slug,

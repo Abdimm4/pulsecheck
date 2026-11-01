@@ -14,3 +14,5 @@ models/*.json
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+# Local Claude Code settings and notes
+.claude/

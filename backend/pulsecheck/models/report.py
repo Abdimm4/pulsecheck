@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -18,6 +18,7 @@ from pulsecheck.models.evaluation import (
     FAILED,
     Prediction,
     evaluate_predictions,
+    paired_auc_delta,
     runtime_summary,
 )
 from pulsecheck.models.heuristic import (
@@ -32,11 +33,18 @@ from pulsecheck.models.heuristic import (
 )
 from pulsecheck.models.training import TrainedModel, load_model, load_table
 
+ALL_SPLITS = "all"
 DISCLAIMER = (
     "These numbers describe this evaluation only: the dataset, compression, "
     "manipulation methods, split and pipeline settings listed under evaluation "
     "conditions. They are not a general accuracy claim and do not show that "
     "PulseCheck can tell whether any other video is authentic."
+)
+SHORTCUT_CRITERION = (
+    "A pulse claim needs pulse > shortcut and combined > shortcut, with the 95% interval "
+    "of each ROC-AUC difference above 0. Otherwise the pulse features have not been shown "
+    "to carry signal beyond resolution, compression, frame rate, duration, brightness and "
+    "face coverage."
 )
 
 
@@ -171,6 +179,8 @@ def render_markdown(report: Mapping) -> str:
             f"| {_with_ci(m, 'specificity')} | {_with_ci(m, 'f1')} | {_with_ci(m, 'roc_auc')} |"
         )
     lines.append("")
+    if report.get("shortcut_baseline"):
+        lines += [*shortcut_markdown(report["shortcut_baseline"], report["methods"]), ""]
 
     for name, entry in report["methods"].items():
         m = entry["metrics"]
@@ -213,18 +223,9 @@ def render_markdown(report: Mapping) -> str:
                 f"specificity {_fmt(forced['specificity'])} (n={forced['n']}).",
                 "",
             ]
-        lines += [
-            "| Manipulation | Videos | Coverage | Inconclusive | Failed | Accuracy "
-            "| ROC-AUC vs all real |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for method, pm in m["per_manipulation"].items():
-            lines.append(
-                f"| {method} | {pm['n']} | {_fmt(pm['coverage'])} | "
-                f"{_fmt(pm['inconclusive_rate'])} | {_fmt(pm['failure_rate'])} | "
-                f"{_fmt(pm['accuracy'])} | {_fmt(pm.get('roc_auc_vs_all_real'))} |"
-            )
-        lines.append("")
+        for title, key in (("Manipulation", "per_manipulation"), ("Family", "per_family")):
+            if key in m:
+                lines += [*breakdown_table(title, m[key]), ""]
         if m["inconclusive_reasons"]:
             lines.append(f"Inconclusive reasons: {json.dumps(m['inconclusive_reasons'])}")
             lines.append("")
@@ -240,6 +241,122 @@ def render_markdown(report: Mapping) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def shortcut_baseline(
+    methods: Mapping[str, Mapping],
+    predictions: Mapping[str, Sequence[Prediction]],
+    n_boot: int = 1000,
+    seed: int = 0,
+) -> dict | None:
+    """ROC-AUC of pulse and combined models minus the shortcut model of the same family.
+
+    Models are matched by training dataset and family through the feature set
+    in their sidecars; None if no shortcut model has a pulse or combined partner.
+    """
+    by_key: dict[tuple, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for name, entry in methods.items():
+        if entry.get("kind") == "trained":
+            key = ((entry.get("training_dataset") or {}).get("name") or "", entry.get("family"))
+            by_key[key][entry.get("feature_set") or "pulse"].append(name)
+    comparisons, verdicts = [], []
+    for (dataset, family), sets in sorted(by_key.items()):
+        for base in sets.get("shortcut", []):
+            above = {}
+            for feature_set in ("pulse", "combined"):
+                found = []
+                for other in sets.get(feature_set, []):
+                    delta = paired_auc_delta(predictions[base], predictions[other], n_boot, seed)
+                    comparisons.append(
+                        {
+                            "training_dataset": dataset,
+                            "family": family,
+                            "shortcut_model": base,
+                            "model": other,
+                            "feature_set": feature_set,
+                            **delta,
+                        }
+                    )
+                    found.append(bool(delta["ci_95"] and delta["ci_95"][0] > 0))
+                above[feature_set] = all(found) if found else None
+            if above["pulse"] is not None or above["combined"] is not None:
+                verdicts.append(
+                    {
+                        "training_dataset": dataset,
+                        "family": family,
+                        "shortcut_model": base,
+                        "pulse_above_shortcut": above["pulse"],
+                        "combined_above_shortcut": above["combined"],
+                        "criterion_met": bool(above["pulse"] and above["combined"]),
+                    }
+                )
+    if not comparisons:
+        return None
+    return {"criterion": SHORTCUT_CRITERION, "comparisons": comparisons, "verdicts": verdicts}
+
+
+def shortcut_markdown(section: Mapping, methods: Mapping[str, Mapping]) -> list[str]:
+    def interval(ci) -> str:
+        return f"[{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else "[n/a]"
+
+    lines = [
+        "## Shortcut baseline",
+        "",
+        "Does each pulse (or pulse + shortcut, \"combined\") model beat a model trained on "
+        "non-physiological media properties only? ROC-AUC differences use the videos both "
+        "models scored, with a paired group-level bootstrap interval.",
+        "",
+        f"**{section['criterion']}**",
+        "",
+        "| Family | Shortcut model | Shortcut ROC-AUC | Model | Set | ROC-AUC "
+        "| Δ ROC-AUC vs shortcut [95% CI] | Videos |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for c in section["comparisons"]:
+        base_m = methods[c["shortcut_model"]]["metrics"]
+        other_m = methods[c["model"]]["metrics"]
+        lines.append(
+            f"| {c['family']} | {c['shortcut_model']} | {_with_ci(base_m, 'roc_auc')} "
+            f"| {c['model']} | {c['feature_set']} | {_with_ci(other_m, 'roc_auc')} "
+            f"| {_fmt(c['delta'])} {interval(c['ci_95'])} | {c['n']} |"
+        )
+    lines.append("")
+    for v in section["verdicts"]:
+        def word(flag) -> str:
+            return "not evaluated" if flag is None else ("yes" if flag else "no")
+
+        lines.append(
+            f"- {v['family']} ({v['training_dataset']}): pulse above shortcut: "
+            f"{word(v['pulse_above_shortcut'])}; combined above shortcut: "
+            f"{word(v['combined_above_shortcut'])}; criterion "
+            f"{'MET' if v['criterion_met'] else 'NOT MET'}."
+        )
+    return lines
+
+
+def breakdown_table(title: str, entries: Mapping[str, Mapping]) -> list[str]:
+    """Markdown rows for a per-manipulation or per-family breakdown."""
+    lines = [
+        f"| {title} | Videos | Coverage | Inconclusive | Failed | Accuracy | Recall "
+        "| ROC-AUC vs all real |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for name, e in entries.items():
+        ci = e.get("ci_95") or {}
+
+        def with_ci(metric: str, ci_key: str, e=e, ci=ci) -> str:
+            interval = ci.get(ci_key)
+            value = _fmt(e.get(metric))
+            return f"{value} [{_fmt(interval[0])}, {_fmt(interval[1])}]" if interval else value
+
+        has_recall = name != "none" and e.get("recall") is not None
+        recall = with_ci("recall", "recall") if has_recall else "-"
+        lines.append(
+            f"| {name} | {e['n']} | {_fmt(e['coverage'])} | {_fmt(e['inconclusive_rate'])} "
+            f"| {_fmt(e['failure_rate'])} | {_fmt(e['accuracy'])} | {recall} "
+            f"| {with_ci('roc_auc_vs_all_real', 'roc_auc_vs_all_real')} |"
+        )
+    return lines
 
 
 def write_report(report: Mapping, out_dir: Path, stem: str) -> tuple[Path, Path]:
@@ -265,16 +382,27 @@ def run_evaluation(
     force: bool = False,
     record: bool = True,
     table_meta: Mapping | None = None,
+    extra: Mapping[str, Mapping[str, str]] | None = None,
+    family_of: Mapping[str, str] | None = None,
+    heuristic_gate: str = "default",
 ) -> tuple[dict, dict[str, list[Prediction]]]:
     """Score trained models and the heuristic on one split of a feature table.
 
     For the test split each model's sidecar records the evaluation; a second
     test evaluation of the same model raises AlreadyEvaluatedError unless
-    `force` is set, and the report then flags it.
+    `force` is set, and the report then flags it. split="all" scores every
+    assigned row, for a table from a dataset the models were not trained on.
+    `extra` columns (manifest, media table) are joined onto the rows, and
+    `family_of` adds a per-family breakdown. A model whose features are not
+    columns of the table raises ValueError instead of being imputed blindly.
     """
     table_path = Path(table_path)
-    data = load_table(table_path)  # raises LeakageError
-    rows, failed = data.rows[split], data.failed[split]
+    data = load_table(table_path, extra)  # raises LeakageError
+    if split == ALL_SPLITS:
+        rows = [r for s in data.rows.values() for r in s]
+        failed = [r for s in data.failed.values() for r in s]
+    else:
+        rows, failed = data.rows[split], data.failed[split]
     if not rows and not failed:
         raise ValueError(f"no {split} videos in {table_path}")
     heuristic_config = heuristic_config or HeuristicConfig()
@@ -289,9 +417,32 @@ def run_evaluation(
                 f"{path.name} was already evaluated on the test split; "
                 "pass --force to re-run, and the report will say so"
             )
+    columns = set().union(*(r.keys() for r in [*rows, *failed]))
+    for path, model in models:
+        absent = [f for f in model.features if f not in columns]
+        if absent:
+            raise ValueError(
+                f"{path.name} needs columns the feature table lacks: {absent[:5]} "
+                "(join them with --extra-columns, or use a model with matching features)"
+            )
+    dataset = table_meta.get("dataset", {})
+    trained_on_datasets = {
+        path.name: (model.sidecar.get("training_dataset") or {}).get("name")
+        for path, model in models
+    }
+    cross = {
+        name: trained
+        for name, trained in trained_on_datasets.items()
+        if trained and dataset.get("dataset") and trained != dataset.get("dataset")
+    }
+    for name, trained in cross.items():
+        table_meta.setdefault("warnings", []).append(
+            f"CROSS-DATASET: {name} was trained on {trained} and is evaluated on "
+            f"{dataset.get('dataset')}"
+        )
     for path, model in models:
         trained_on = model.sidecar.get("data_version", {}).get("feature_table_sha256")
-        if trained_on and trained_on != table_sha:
+        if trained_on and trained_on != table_sha and path.name not in cross:
             table_meta.setdefault("warnings", []).append(
                 f"{path.name} was trained on a different feature table version"
             )
@@ -316,17 +467,18 @@ def run_evaluation(
             "model_name": model.sidecar.get("model_name"),
             "model_version": model.sidecar.get("model_version"),
             "family": model.sidecar.get("family"),
+            "feature_set": (model.sidecar.get("features") or {}).get("set", "pulse"),
             "hyperparameters": model.sidecar.get("hyperparameters"),
             "decision": model.sidecar.get("decision"),
             "training_dataset": model.sidecar.get("training_dataset"),
             "prior_test_evaluations": prior[path],
         }
     for name, preds in predictions.items():
-        methods[name]["metrics"] = evaluate_predictions(preds, n_boot, seed)
+        methods[name]["metrics"] = evaluate_predictions(preds, n_boot, seed, family_of)
+    shortcut = shortcut_baseline(methods, predictions, n_boot, seed)
 
     all_rows = [*rows, *failed]
     reasons = dict(Counter(r["failure_reason"] for r in failed))
-    dataset = table_meta.get("dataset", {})
     now = datetime.now(UTC)
     groups = {r["group_id"] for r in all_rows}
     report = {
@@ -342,6 +494,9 @@ def run_evaluation(
             "split_source": dataset.get("split_source"),
             "sampling": dataset.get("sampling"),
             "license": dataset.get("license_notes"),
+            "models_trained_on": trained_on_datasets,
+            "cross_dataset": bool(cross),
+            "heuristic_quality_gate": heuristic_gate,
             "videos": len(all_rows),
             "real_videos": sum(r["label"] == "real" for r in all_rows),
             "fake_videos": sum(r["label"] == "fake" for r in all_rows),
@@ -360,6 +515,7 @@ def run_evaluation(
             ],
         },
         "methods": methods,
+        "shortcut_baseline": shortcut,
         "runtime": {
             "extraction": runtime_summary([float(r["runtime_s"] or "nan") for r in all_rows]),
             "videos": len(all_rows),
@@ -370,11 +526,11 @@ def run_evaluation(
         },
     }
 
-    if record and split == "test":
+    if record and split in ("test", ALL_SPLITS):
         for path, model in models:
             model.sidecar.setdefault("test_evaluations", []).append(
                 {
-                    "split": "test",
+                    "split": split,
                     "at": report["created_at"],
                     "feature_table_sha256": table_sha,
                     "forced_rerun": bool(prior[path]),

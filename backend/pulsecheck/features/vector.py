@@ -66,6 +66,19 @@ FEATURE_NAMES = (
     *(f"{_pair_name(a, b)}.{name}" for a, b in ROI_PAIRS for name in PAIR_FEATURES),
     *VIDEO_FEATURES,
 )
+# Features that measure face tracking rather than the pulse. They depend on
+# resolution and compression, so a classifier could learn a source shortcut
+# through them; they stay in the table for the quality gate but are left out of
+# PULSE_CLASSIFIER_FEATURES, the trained classifiers' default candidates. The
+# quality scores are weighted by tracking coverage and stay in; the confound
+# audit (scripts/audit_confounds.py) shows how much media they carry.
+TRACKING_FEATURES = (
+    *(f"{roi}.tracking_coverage" for roi in ROI_NAMES),
+    "face_coverage",
+    "all_rois_valid_fraction",
+    "usable_roi_count",
+)
+PULSE_CLASSIFIER_FEATURES = tuple(n for n in FEATURE_NAMES if n not in TRACKING_FEATURES)
 
 
 @dataclass(frozen=True)

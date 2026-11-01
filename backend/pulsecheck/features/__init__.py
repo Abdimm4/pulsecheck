@@ -1,6 +1,8 @@
 from pulsecheck.features.vector import (
     FEATURE_NAMES,
     FEATURE_SCHEMA_VERSION,
+    PULSE_CLASSIFIER_FEATURES,
+    TRACKING_FEATURES,
     FeatureVector,
     QualityConfig,
     VideoSignals,
@@ -11,6 +13,8 @@ from pulsecheck.features.vector import (
 __all__ = [
     "FEATURE_NAMES",
     "FEATURE_SCHEMA_VERSION",
+    "PULSE_CLASSIFIER_FEATURES",
+    "TRACKING_FEATURES",
     "FeatureVector",
     "QualityConfig",
     "VideoSignals",

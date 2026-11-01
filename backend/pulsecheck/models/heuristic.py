@@ -15,7 +15,7 @@ inconclusive whenever signal quality or tracking is too low to judge.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 
 import numpy as np
@@ -68,6 +68,18 @@ class HeuristicConfig:
         if unknown:
             raise ValueError(f"unknown heuristic settings: {sorted(unknown)}")
         return cls(**values)
+
+
+GATE_FIELDS = ("min_signal_quality", "min_usable_rois", "min_face_coverage")
+
+
+def with_gate(config: HeuristicConfig, gate: Mapping | None) -> HeuristicConfig:
+    """`config` with its quality gates replaced; None turns the gates off."""
+    gate = dict(gate) if gate is not None else dict.fromkeys(GATE_FIELDS, 0)
+    unknown = set(gate) - set(GATE_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown quality-gate settings: {sorted(unknown)}")
+    return replace(config, **gate)
 
 
 @dataclass

@@ -126,6 +126,45 @@ python scripts/evaluate.py data/features/ffpp_c23.csv     --model models/ffpp-c2
   state their evaluation conditions. A second test evaluation of a model needs `--force` and
   is flagged.
 
+### Shortcut checks (source and compression confounds)
+
+If real and fake videos come from different sources, a classifier can tell them apart by
+resolution, bitrate, frame rate, duration or brightness without any pulse information.
+Every pulse result should be read against such a shortcut baseline.
+
+```bash
+# Non-physiological per-video properties (resolution, fps, duration, bitrate, brightness).
+python scripts/probe_media.py data/manifests/ffpp_c23.csv --workers 4   # -> data/features/ffpp_c23_media.csv
+
+# Shortcut-only, pulse and pulse + shortcut ("combined") models, gate off so they compare.
+for set in shortcut pulse combined; do
+  python scripts/train_model.py data/features/ffpp_c23.csv \
+      --extra-columns data/features/ffpp_c23_media.csv --feature-set $set --gate off --tag gate-off
+done
+
+# One test evaluation of all of them: the report gains a "Shortcut baseline" section.
+python scripts/evaluate.py data/features/ffpp_c23.csv --extra-columns data/features/ffpp_c23_media.csv \
+    --model models/<each saved .pkl> ... --tag shortcut-check --out-dir data/reports/ffpp_c23
+
+# Which pulse features track the media? (train split; md + json under data/reports/<table>/)
+python scripts/audit_confounds.py data/features/ffpp_c23.csv \
+    --media data/features/ffpp_c23_media.csv --manifest data/manifests/ffpp_c23.csv
+```
+
+- The default `pulse` feature set leaves out tracking/coverage features (`face_coverage`,
+  per-ROI `tracking_coverage`, `all_rois_valid_fraction`, `usable_roi_count`), which depend
+  on resolution and compression; the quality gate still uses them. `pulse-full` restores the
+  old set (model version 0.1.0).
+- The "Shortcut baseline" section reports ROC-AUC differences pulse - shortcut and
+  combined - shortcut per model family, with paired group-bootstrap 95% intervals. A pulse
+  claim needs both differences above 0 with their intervals.
+- `scripts/normalize_videos.py` writes normalised copies of a dataset (fixed face-centred
+  256x256 crop, constant 30 fps, first 8 s, one brightness gain per clip, identical libx264
+  settings via `imageio-ffmpeg`) and a manifest for them (`data/manifests/<name>_norm.csv`),
+  so the shortcut test can be rerun with the file properties equalised. Clips that are too
+  short or have no face are listed as failed in the manifest sidecar. The copies are derived
+  data: keep them under `data/` and do not share them.
+
 Keep videos and datasets out of Git (see `.gitignore`).
 
 ## API and worker

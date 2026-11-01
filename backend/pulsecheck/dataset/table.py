@@ -18,7 +18,7 @@ import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from pulsecheck.dataset.manifest import SplitRecord
+from pulsecheck.dataset.manifest import SplitRecord, read_manifest
 from pulsecheck.features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, FeatureVector
 
 META_COLUMNS = (
@@ -130,3 +130,77 @@ def split_records(rows: Iterable[Mapping[str, str]]) -> list[SplitRecord]:
         links = tuple(f"{row['source_dataset']}:{k}" for k in keys if k)
         out.append(SplitRecord(row["video_id"], row["split"], links))
     return out
+
+
+def read_columns(path: str | Path) -> dict[str, dict[str, str]]:
+    """Any CSV with a video_id column, as video_id -> {column: value}."""
+    with Path(path).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if "video_id" not in (reader.fieldnames or ()):
+            raise ValueError(f"{path} has no video_id column")
+        return {row["video_id"]: dict(row) for row in reader}
+
+
+def manifest_columns(path: str | Path) -> dict[str, dict[str, str]]:
+    """Manifest fields to join onto feature-table rows (family, CV fold, annotations)."""
+    return {
+        row.video_id: {
+            "label": row.label,
+            "split": row.split,
+            "fake_family": row.fake_family,
+            "cv_fold": row.cv_fold,
+            "attributes": row.attributes,
+        }
+        for row in read_manifest(path)
+    }
+
+
+CHECKED_ON_JOIN = ("label", "split", "source_dataset", "manipulation_type")
+
+
+def attach_columns(
+    rows: Iterable[Mapping[str, str]], extra: Mapping[str, Mapping[str, str]]
+) -> list[dict[str, str]]:
+    """Copy each row and add the columns of extra[video_id] it does not have yet.
+
+    Columns the row already has are kept; for the identifying ones
+    (CHECKED_ON_JOIN) a disagreement raises ValueError, since it means the
+    extra table describes a different build of the dataset. Rows without an
+    entry in `extra` get empty cells for the new columns.
+    """
+    rows = [dict(r) for r in rows]
+    columns = sorted({c for values in extra.values() for c in values} - {"video_id"})
+    for row in rows:
+        values = extra.get(row["video_id"], {})
+        for column in columns:
+            value = values.get(column, "")
+            if column not in row:
+                row[column] = value
+            elif column in CHECKED_ON_JOIN and value and row[column] != value:
+                raise ValueError(
+                    f"{row['video_id']}: {column} is {row[column]!r} in the feature table "
+                    f"but {value!r} in the joined table"
+                )
+    return rows
+
+
+def join_tables(
+    manifest: str | Path | None, extra: Iterable[str | Path] = ()
+) -> dict[str, dict[str, str]]:
+    """video_id -> columns from the manifest and any extra CSVs (later files win)."""
+    out: dict[str, dict[str, str]] = {}
+    sources = [manifest_columns(manifest)] if manifest else []
+    sources += [read_columns(path) for path in extra]
+    for source in sources:
+        for video_id, values in source.items():
+            out.setdefault(video_id, {}).update(values)
+    return out
+
+
+def family_map(manifest: str | Path | None) -> dict[str, str] | None:
+    """manipulation_type -> fake_family from a manifest, or None if it has none."""
+    if not manifest:
+        return None
+    rows = read_manifest(manifest)
+    mapping = {r.manipulation_type: r.fake_family for r in rows if r.fake_family}
+    return mapping or None

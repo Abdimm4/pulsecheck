@@ -20,7 +20,7 @@ A metric that cannot be computed (e.g. ROC-AUC with one class) is None.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -104,21 +104,30 @@ def _point(y, state, score) -> dict:
     return metrics
 
 
+def _group_indices(preds: Sequence[Prediction]) -> list[np.ndarray]:
+    """Row indices of each split group (the bootstrap's resampling unit)."""
+    members: dict[str, list[int]] = defaultdict(list)
+    for i, p in enumerate(preds):
+        members[p.group_id or p.video_id].append(i)
+    return [np.array(v) for v in members.values()]
+
+
+def _resample(groups: Sequence[np.ndarray], rng: np.random.Generator) -> np.ndarray:
+    return np.concatenate([groups[g] for g in rng.integers(0, len(groups), len(groups))])
+
+
 def bootstrap_ci(
     preds: Sequence[Prediction], n_boot: int = 1000, seed: int = 0, level: float = 0.95
 ) -> dict[str, list[float] | None]:
     """Group-level percentile bootstrap CIs for CI_METRICS."""
     y, state, score = _arrays(preds)
-    members: dict[str, list[int]] = defaultdict(list)
-    for i, p in enumerate(preds):
-        members[p.group_id or p.video_id].append(i)
-    groups = [np.array(v) for v in members.values()]
+    groups = _group_indices(preds)
     if len(groups) < 2 or n_boot < 1:
         return dict.fromkeys(CI_METRICS)
     rng = np.random.default_rng(seed)
     samples: dict[str, list[float]] = {m: [] for m in CI_METRICS}
     for _ in range(n_boot):
-        idx = np.concatenate([groups[g] for g in rng.integers(0, len(groups), len(groups))])
+        idx = _resample(groups, rng)
         point = _point(y[idx], state[idx], score[idx])
         for m in CI_METRICS:
             if point[m] is not None:
@@ -131,6 +140,49 @@ def bootstrap_ci(
             out[m] = None
         else:
             out[m] = [float(np.quantile(values, alpha)), float(np.quantile(values, 1 - alpha))]
+    return out
+
+
+def paired_auc_delta(
+    baseline: Sequence[Prediction],
+    other: Sequence[Prediction],
+    n_boot: int = 1000,
+    seed: int = 0,
+    level: float = 0.95,
+) -> dict:
+    """ROC-AUC of `other` minus `baseline` on the videos both scored, with a paired CI.
+
+    Both methods are evaluated on the same group-bootstrap resamples, so the
+    interval reflects the difference rather than two independent spreads.
+    """
+    by_id = {p.video_id: p for p in baseline if p.score is not None}
+    pairs = [(by_id[p.video_id], p) for p in other if p.score is not None and p.video_id in by_id]
+    base = [a for a, _ in pairs]
+    y = np.array([a.label for a in base], dtype=int)
+    score_a = np.array([a.score for a, _ in pairs], dtype=float)
+    score_b = np.array([b.score for _, b in pairs], dtype=float)
+    auc_a, auc_b = safe_auc(y, score_a), safe_auc(y, score_b)
+    out = {
+        "n": len(pairs),
+        "baseline_roc_auc": auc_a,
+        "other_roc_auc": auc_b,
+        "delta": None if auc_a is None or auc_b is None else auc_b - auc_a,
+        "ci_95": None,
+        "bootstrap": {"resamples": n_boot, "unit": "split group", "seed": seed, "paired": True},
+    }
+    groups = _group_indices(base)
+    if out["delta"] is None or len(groups) < 2 or n_boot < 1:
+        return out
+    rng = np.random.default_rng(seed)
+    deltas = []
+    for _ in range(n_boot):
+        idx = _resample(groups, rng)
+        a, b = safe_auc(y[idx], score_a[idx]), safe_auc(y[idx], score_b[idx])
+        if a is not None and b is not None:
+            deltas.append(b - a)
+    if len(deltas) >= 0.9 * n_boot:
+        alpha = (1 - level) / 2
+        out["ci_95"] = [float(np.quantile(deltas, alpha)), float(np.quantile(deltas, 1 - alpha))]
     return out
 
 
@@ -152,8 +204,16 @@ def _subset_summary(preds: Sequence[Prediction]) -> dict:
     }
 
 
-def evaluate_predictions(preds: Sequence[Prediction], n_boot: int = 1000, seed: int = 0) -> dict:
-    """Aggregate metrics, CIs and the per-manipulation breakdown."""
+def evaluate_predictions(
+    preds: Sequence[Prediction],
+    n_boot: int = 1000,
+    seed: int = 0,
+    family_of: Mapping[str, str] | None = None,
+) -> dict:
+    """Aggregate metrics, CIs and per-manipulation (and, with family_of, per-family) results.
+
+    `family_of` maps manipulation_type to a coarser family (e.g. face_swap).
+    """
     preds = list(preds)
     summary = _subset_summary(preds)
     summary["confidence_intervals_95"] = bootstrap_ci(preds, n_boot, seed)
@@ -170,22 +230,38 @@ def evaluate_predictions(preds: Sequence[Prediction], n_boot: int = 1000, seed: 
             y, np.array([p.forced for p in forced])
         )
 
+    summary["per_manipulation"] = breakdown(preds, lambda p: p.manipulation_type, n_boot, seed)
+    if family_of:
+        summary["per_family"] = breakdown(
+            preds, lambda p: family_of.get(p.manipulation_type, "unknown"), n_boot, seed
+        )
+    return summary
+
+
+def breakdown(
+    preds: Sequence[Prediction], key, n_boot: int = 1000, seed: int = 0
+) -> dict[str, dict]:
+    """Per-category summaries; fake categories also get ROC-AUC against all real videos.
+
+    Thresholded rates are within the category's own videos. For fake
+    categories, `ci_95` holds group-bootstrap intervals for recall and
+    ROC-AUC computed on the category plus every real video.
+    """
     reals = [p for p in preds if p.label == 0]
-    per_method = {}
-    for method in sorted({p.manipulation_type for p in preds}):
-        subset = [p for p in preds if p.manipulation_type == method]
+    out = {}
+    for name in sorted({key(p) for p in preds}):
+        subset = [p for p in preds if key(p) == name]
         entry = _subset_summary(subset)
-        if method != "none":
-            # Fakes of one method against all real test videos (ROC-AUC only);
-            # the thresholded rates are within the method's own videos.
-            pair = subset + reals
+        if any(p.label == 1 for p in subset):
+            pair = [p for p in subset if p.label == 1] + reals
             y, _, score = _arrays(pair)
             scored = np.isfinite(score)
             entry["roc_auc_vs_all_real"] = safe_auc(y[scored], score[scored])
+            ci = bootstrap_ci(pair, n_boot, seed)
+            entry["ci_95"] = {"recall": ci["recall"], "roc_auc_vs_all_real": ci["roc_auc"]}
         entry.pop("roc_auc", None)  # undefined within a single class
-        per_method[method] = entry
-    summary["per_manipulation"] = per_method
-    return summary
+        out[name] = entry
+    return out
 
 
 def runtime_summary(runtimes: Sequence[float]) -> dict:
