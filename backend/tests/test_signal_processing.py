@@ -269,7 +269,7 @@ def test_config_validation_and_mapping():
 def test_unknown_method_raises():
     t, x = _sine(1.0)
     with pytest.raises(ValueError):
-        process_trace(t, x, "pos")
+        process_trace(t, x, "ica")
 
 
 def test_chrom_needs_rgb():
@@ -281,3 +281,74 @@ def test_chrom_needs_rgb():
 def test_signal_rejected_carries_reason():
     exc = SignalRejected("too_short", "detail")
     assert exc.reason == "too_short" and str(exc) == "detail"
+
+
+def test_pos_needs_rgb():
+    t, x = _sine(1.0)
+    with pytest.raises(ValueError):
+        process_trace(t, x, "pos")
+
+
+@pytest.mark.parametrize("freq", [0.9, 1.3, 2.0])
+def test_pos_estimates_known_frequency_despite_intensity_drift(freq):
+    t, rgb = _rgb_pulse(freq, seed=4)
+    sig = process_trace(t, rgb, "pos")
+    assert sig.ok, sig.detail
+    assert sig.peak.frequency_hz == pytest.approx(freq, abs=FREQ_TOL_HZ)
+    assert sig.settings["filter"]["pos_window_s"] == 1.6
+
+
+def test_smoothness_priors_detrending_halves_the_cutoff_and_keeps_the_band():
+    from pulsecheck.signals.processing import smoothness_priors_detrend
+
+    fs = 30.0
+    t = np.arange(0, 30, 1 / fs)
+    middle = slice(200, -200)  # away from the ends
+
+    def gain(freq):
+        x = np.sin(2 * np.pi * freq * t)
+        y = smoothness_priors_detrend(x, fs, cutoff_hz=0.4)
+        return np.std(y[middle]) / np.std(x[middle])
+
+    assert gain(0.4) == pytest.approx(0.5, abs=0.02)
+    assert gain(0.1) < 0.02
+    assert gain(1.2) > 0.97
+    t2, rgb = _rgb_pulse(1.1, seed=5)
+    sig = process_trace(t2, rgb, "chrom", SignalConfig(detrend="smoothness_priors"))
+    assert sig.ok and sig.peak.frequency_hz == pytest.approx(1.1, abs=FREQ_TOL_HZ)
+
+
+def test_harmonic_peak_picking_prefers_the_fundamental():
+    fs = 30.0
+    t = np.arange(0, 15, 1 / fs)
+    rng = np.random.default_rng(7)
+    # A pulse whose second harmonic is stronger than its fundamental.
+    x = 100 + 0.8 * np.sin(2 * np.pi * 1.0 * t) + 1.0 * np.sin(2 * np.pi * 2.0 * t)
+    x = x + 0.05 * rng.normal(size=t.size)
+    argmax = process_trace(t, x, "green")
+    harmonic = process_trace(t, x, "green", SignalConfig(peak_picking="harmonic"))
+    assert argmax.peak.frequency_hz == pytest.approx(2.0, abs=FREQ_TOL_HZ)
+    assert harmonic.peak.frequency_hz == pytest.approx(1.0, abs=FREQ_TOL_HZ)
+    with pytest.raises(ValueError):
+        SignalConfig(peak_picking="median")
+
+
+def test_fused_spectrum_and_snr_at_a_known_frequency():
+    from pulsecheck.signals.processing import fuse_spectra, snr_at_frequency
+
+    t, rgb = _rgb_pulse(1.2, seed=8)
+    a = process_trace(t, rgb, "chrom")
+    b = process_trace(t, rgb * 2.0 + 5.0, "chrom")
+    fused = fuse_spectra([a.spectrum, b.spectrum])
+    assert fused.power[fused.in_band()].sum() == pytest.approx(1.0)
+    assert snr_at_frequency(fused, 1.2) > 5.0
+    assert snr_at_frequency(fused, 2.6) < 0.0
+    slower = process_trace(t[::2], rgb[::2], "chrom")  # 15 Hz: a different grid
+    with pytest.raises(ValueError):
+        fuse_spectra([a.spectrum, slower.spectrum])
+
+
+def test_stability_can_be_skipped():
+    t, rgb = _rgb_pulse(1.0, seed=9)
+    assert process_trace(t, rgb, "chrom").window_freqs_hz.size > 0
+    assert process_trace(t, rgb, "chrom", stability=False).window_freqs_hz.size == 0

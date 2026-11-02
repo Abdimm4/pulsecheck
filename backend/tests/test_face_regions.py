@@ -144,3 +144,23 @@ def test_wrong_landmark_shape_raises():
 def test_face_frame_measures_interocular_distance():
     frame = face_frame(transform(synthetic_landmarks(), angle_deg=30, scale=2.0))
     assert frame.interocular == pytest.approx(200.0, rel=1e-3)
+
+
+def test_large_layout_and_face_roi_are_skin_only_and_bigger():
+    landmarks = synthetic_landmarks()
+    image = render_face(landmarks, SKIN_BGR)
+    standard = compute_rois(landmarks, FRAME_SHAPE)
+    large = compute_rois(landmarks, FRAME_SHAPE, RoiConfig(layout="large", face_roi=True))
+    assert set(large) == {*ROI_NAMES, "face"}
+    for roi in large.values():
+        assert roi.valid, (roi.name, roi.reason)
+        x0, y0, x1, y1 = roi.bbox
+        assert (image[y0:y1, x0:x1][roi.mask] == SKIN_BGR).all(), roi.name
+    for name in ROI_NAMES:
+        assert large[name].pixel_count > standard[name].pixel_count
+    assert large["face"].pixel_count > sum(large[n].pixel_count for n in ROI_NAMES)
+
+
+def test_unknown_layout_is_rejected():
+    with pytest.raises(ValueError):
+        RoiConfig(layout="tiny")

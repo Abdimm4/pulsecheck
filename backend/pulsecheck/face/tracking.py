@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from pulsecheck.face.regions import ROI_NAMES, Roi
+from pulsecheck.face.regions import ALL_ROI_NAMES, ROI_NAMES, Roi
 
 
 @dataclass(frozen=True)
@@ -54,15 +54,19 @@ class TrackingMonitor:
         self._faces = 0
         self._all_valid = 0
         self._valid: Counter[str] = Counter()
-        self._reasons: dict[str, Counter[str]] = {name: Counter() for name in ROI_NAMES}
-        self._jitter: dict[str, list[float]] = {name: [] for name in ROI_NAMES}
-        self._prev_centroid: dict[str, tuple[float, float] | None] = dict.fromkeys(ROI_NAMES)
+        self._reasons: dict[str, Counter[str]] = {name: Counter() for name in ALL_ROI_NAMES}
+        self._jitter: dict[str, list[float]] = {name: [] for name in ALL_ROI_NAMES}
+        self._prev_centroid: dict[str, tuple[float, float] | None] = dict.fromkeys(ALL_ROI_NAMES)
+        self._seen: set[str] = set(ROI_NAMES)  # plus the face ROI once it is reported
 
     def update(self, rois: dict[str, Roi], face_detected: bool, interocular: float | None) -> None:
         self._total += 1
         self._faces += int(face_detected)
-        self._all_valid += int(all(roi.valid for roi in rois.values()))
+        # "All ROIs" means the regional ones, so the figure does not depend on
+        # whether the optional whole-face ROI is built.
+        self._all_valid += int(all(rois[n].valid for n in ROI_NAMES if n in rois))
         for name, roi in rois.items():
+            self._seen.add(name)
             centroid = roi.centroid() if roi.valid else None
             if roi.valid:
                 self._valid[name] += 1
@@ -85,7 +89,7 @@ class TrackingMonitor:
             warnings.append(f"Face detected in only {coverage:.0%} of frames")
 
         rois = {}
-        for name in ROI_NAMES:
+        for name in (n for n in ALL_ROI_NAMES if n in self._seen):
             valid = self._valid[name]
             fraction = valid / total if total else 0.0
             jitter = float(np.median(self._jitter[name])) if self._jitter[name] else None
@@ -104,7 +108,7 @@ class TrackingMonitor:
         reliable = (
             total > 0
             and coverage >= t.min_face_coverage
-            and all(r.valid_fraction >= t.min_roi_valid_fraction for r in rois.values())
+            and all(rois[n].valid_fraction >= t.min_roi_valid_fraction for n in ROI_NAMES)
         )
         return TrackingReport(
             total_frames=total,

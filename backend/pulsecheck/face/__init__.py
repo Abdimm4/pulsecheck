@@ -4,10 +4,20 @@ from pulsecheck.face.landmarker import (
     LandmarkerUnavailableError,
     default_model_path,
 )
-from pulsecheck.face.regions import ROI_NAMES, Roi, RoiConfig, compute_rois, face_frame
+from pulsecheck.face.regions import (
+    ALL_ROI_NAMES,
+    FACE_ROI,
+    ROI_NAMES,
+    Roi,
+    RoiConfig,
+    compute_rois,
+    face_frame,
+)
 from pulsecheck.face.tracking import TrackingMonitor, TrackingReport, TrackingThresholds
 
 __all__ = [
+    "ALL_ROI_NAMES",
+    "FACE_ROI",
     "ROI_NAMES",
     "FaceLandmarkerDetector",
     "LandmarkDetector",

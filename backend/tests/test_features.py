@@ -59,7 +59,9 @@ def test_shared_pulse_gives_consistent_features():
     result = analyze_traces(traces)
     f = result.features
     _assert_clean(f)
-    assert f.missing == {}
+    # Schema 2: no face ROI was traced and the per-ROI source has no primary estimate.
+    assert all(n.startswith(("face.", "pulse_")) for n in f.missing)
+    assert set(f.missing.values()) == {"roi_disabled", "hr_source_per_roi"}
     for roi in ROI_NAMES:
         assert f.get(f"{roi}.dominant_hz") == pytest.approx(1.2, abs=0.05)
         assert f.get(f"{roi}.method_diff_hz") < 0.05
@@ -195,8 +197,45 @@ def test_default_yaml_loads_into_configs():
     config = load_config()
     signal = SignalConfig.from_mapping(config["signal"])
     assert signal.band_hz == (0.7, 3.0)
+    # The YAML keeps the schema-1 pipeline (the Phase 5A variant is opt-in), so it
+    # matches the code defaults.
     assert signal == SignalConfig()
     assert HeuristicConfig.from_mapping(config["heuristic"]) == HeuristicConfig()
     assert QualityConfig.from_mapping(config["features"]["quality"]) == QualityConfig()
     assert config["heuristic"]["calibrated"] is False
-    assert config["features"]["pulse_method"] in ("chrom", "green")
+    assert config["features"]["pulse_method"] == "chrom"
+    assert config["features"]["hr_source"] == "per_roi"
+    assert config["color_signal"]["face_roi"] is False
+
+
+def _with_face(traces, freq, noise=0.05, seed=11):
+    t = traces.timestamps_s
+    rng = np.random.default_rng(seed)
+    pulse = np.sin(2 * np.pi * freq * t)
+    rgb = np.array([160.0, 120.0, 95.0]) + pulse[:, None] * [0.3, 0.8, 0.2]
+    rgb = rgb + noise * rng.normal(size=rgb.shape)
+    valid = np.ones(t.size, dtype=bool)
+    traces.rois["face"] = RoiTrace("face", rgb, valid, np.full(t.size, 5000))
+    traces.tracking.rois["face"] = RoiTrackingStats("face", t.size, 1.0, 0.01)
+    return traces
+
+
+@pytest.mark.parametrize("source", ["fused", "face"])
+def test_primary_pulse_estimate_sets_signal_quality(source):
+    traces = _with_face(_traces(dict.fromkeys(ROI_NAMES, 1.3)), 1.3)
+    f = analyze_traces(traces, pulse_method="pos", hr_source=source).features
+    _assert_clean(f)
+    assert f.get("pulse_hz") == pytest.approx(1.3, abs=0.05)
+    assert f.get("face.dominant_hz") == pytest.approx(1.3, abs=0.05)
+    assert f.get("signal_quality") == f.get("pulse_quality") > 0.5
+    assert f.get("usable_roi_count") == 3  # regional ROIs only
+
+
+def test_face_source_without_face_roi_is_missing_not_an_error():
+    traces = _traces(dict.fromkeys(ROI_NAMES, 1.3))
+    f = analyze_traces(traces, hr_source="face").features
+    _assert_clean(f)
+    assert f.missing["pulse_hz"] == "roi_disabled"
+    assert f.get("signal_quality") == 0.0
+    with pytest.raises(ValueError):
+        analyze_traces(traces, hr_source="nose")

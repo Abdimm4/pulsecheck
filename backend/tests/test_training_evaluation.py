@@ -301,3 +301,35 @@ def test_train_and_evaluate_cli(tmp_path, table):
     assert len(list(reports.glob("*.predictions.csv"))) == 1
     done = subprocess.run(cmd, capture_output=True, text=True)
     assert done.returncode == 1 and "already evaluated" in done.stderr
+
+
+def test_prior_split_evaluations_lists_earlier_reports_of_the_same_split(tmp_path):
+    import json as _json
+
+    from pulsecheck.models.report import prior_split_evaluations
+
+    def write(name, created, dataset="D", split_source="S", split="test"):
+        cond = {
+            "dataset": dataset,
+            "split_source": split_source,
+            "split": split,
+            "compression": "c23",
+            "heuristic_quality_gate": "off",
+            "models_trained_on": {"a.pkl": dataset},
+        }
+        path = tmp_path / "sub" / f"evaluation-{name}.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(_json.dumps({"created_at": created, "evaluation_conditions": cond}))
+
+    write("one", "2026-01-01T00:00:00+00:00")
+    write("two", "2026-01-02T00:00:00+00:00")
+    write("val", "2026-01-01T00:00:00+00:00", split="val")
+    write("other", "2026-01-01T00:00:00+00:00", dataset="E")
+    write("later", "2026-02-01T00:00:00+00:00")
+    found = prior_split_evaluations(
+        tmp_path,
+        {"dataset": "D", "split_source": "S", "split": "test"},
+        before="2026-01-15T00:00:00+00:00",
+    )
+    assert [p["report"] for p in found] == ["evaluation-one.json", "evaluation-two.json"]
+    assert found[0]["models"] == 1

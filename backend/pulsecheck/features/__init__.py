@@ -1,6 +1,7 @@
 from pulsecheck.features.vector import (
     FEATURE_NAMES,
     FEATURE_SCHEMA_VERSION,
+    HR_SOURCES,
     PULSE_CLASSIFIER_FEATURES,
     TRACKING_FEATURES,
     FeatureVector,
@@ -13,6 +14,7 @@ from pulsecheck.features.vector import (
 __all__ = [
     "FEATURE_NAMES",
     "FEATURE_SCHEMA_VERSION",
+    "HR_SOURCES",
     "PULSE_CLASSIFIER_FEATURES",
     "TRACKING_FEATURES",
     "FeatureVector",

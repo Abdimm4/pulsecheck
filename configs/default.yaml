@@ -1,7 +1,7 @@
 # PulseCheck default configuration. Values are initial proposals from the PRD;
 # adjust after load and memory testing. pulsecheck.config loads this file (or
-# $PULSECHECK_CONFIG). Every section is read by code except face, color_signal
-# and regions, which only document the code defaults for now.
+# $PULSECHECK_CONFIG). Every section is read by code except face and regions,
+# which only document the code defaults for now.
 
 upload:                      # UP-1 (pulsecheck.jobs.validation.UploadLimits)
   allowed_formats: [mp4, mov]  # checked from the file's bytes, not its name or MIME type
@@ -36,30 +36,52 @@ face:                        # FR-3 (defaults mirror pulsecheck.face)
   min_roi_valid_fraction: 0.8
   max_median_jitter_iod: 0.05
 
-color_signal:                # FR-4 (defaults mirror pulsecheck.signals)
-  statistic: mean
+# color_signal, signal and features below keep the earlier (schema 1) pipeline:
+# CHROM per forehead/cheek ROI, linear detrending, filter order 4, 10 s Welch window.
+# Phase 5A selected a variant on the injection benchmark's dev half
+# (scripts/benchmark_extraction.py; report under data/reports/benchmark/), but it was
+# not a demonstrated improvement on held-out at realistic amplitudes (+3.2 pp
+# [-2.8, +10.6]) and extraction takes about twice as long, so it is opt-in. To use
+# it, set the values marked "Phase 5A" in the comments: face_roi true, filter_order 2,
+# detrend smoothness_priors, welch_window_s 6, pulse_method pos, hr_source face and
+# the Phase 5A quality ramps. The v2 feature tables and NFI v2 models used it.
+color_signal:                # FR-4 (pulsecheck.signals.ColorSignalConfig)
+  statistic: mean              # mean or robust (drops clipped and luma-outlier pixels)
   max_clipped_fraction: 0.25
+  roi_layout: standard         # standard or large forehead/cheek patches
+  face_roi: false              # also trace the whole-face skin ROI ("face"); Phase 5A: true
+  landmark_smoothing_frames: 0 # centred moving average of landmarks; 0 = off
 
-signal:                      # FR-5 (defaults mirror pulsecheck.signals.SignalConfig)
+signal:                      # FR-5 (pulsecheck.signals.SignalConfig; differences noted)
   bandpass_hz: [0.7, 3.0]    # roughly 42-180 bpm
-  filter_order: 4            # zero-phase Butterworth (sosfiltfilt)
+  filter_order: 4            # zero-phase Butterworth (sosfiltfilt); Phase 5A: 2
   resample_hz: null          # null: the video's median frame rate
   max_resample_hz: 60
   min_duration_s: 6.0        # shorter signals are rejected
   min_sample_rate_hz: 7.5    # slower signals are rejected
   min_valid_fraction: 0.7    # of frames with a valid ROI sample
   max_gap_s: 2.0             # longer runs of missing samples are rejected
-  detrend: linear            # linear, constant or none
+  detrend: linear            # linear, constant, none or smoothness_priors; Phase 5A: smoothness_priors
+  detrend_cutoff_hz: 0.4     # smoothness_priors only: half-amplitude corner
   chrom_window_s: 1.6
-  welch_window_s: 10.0
+  pos_window_s: 1.6
+  welch_window_s: 10.0       # Phase 5A: 6.0 (8 s normalised clips gave one window at 10)
   spectrum_resolution_hz: 0.01
   peak_halfwidth_hz: 0.1
   stability_window_s: 6.0
   stability_step_s: 1.0
+  peak_picking: argmax       # argmax or harmonic (P(f) + harmonic_weight * P(2f))
+  harmonic_weight: 0.5
 
 features:                    # FR-6
-  pulse_method: chrom        # chrom or green; the other is kept for comparison
-  quality:                   # signal-quality score ramps (uncalibrated)
+  pulse_method: chrom        # green, chrom or pos; the others are kept for comparison; Phase 5A: pos
+  hr_source: per_roi         # per_roi, fused or face: source of the pulse_* estimate; Phase 5A: face
+  quality:                   # signal-quality score ramps of the primary estimate
+    # Hand-set (uncalibrated) ramps for this pipeline. The Phase 5A ramps,
+    # concentration [0.264, 0.309] and SNR [7.064, 8.223] dB, were fitted for the
+    # Phase 5A variant on the benchmark's dev half (median among incorrect to median
+    # among correct HR estimates) and separate them only weakly: ROC-AUC 0.62 dev,
+    # 0.58 held-out (these ramps: 0.58 / 0.57). Use them only with that variant.
     concentration_range: [0.35, 0.75]   # spectral concentration mapped onto 0-1
     snr_range_db: [10.0, 20.0]          # SNR proxy mapped onto 0-1
 

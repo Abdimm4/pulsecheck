@@ -4,11 +4,15 @@ Pipeline for one ROI:
 
 1. Validate timestamps and samples, then resample the valid samples onto a
    uniform grid by linear interpolation (missing frames are NaN in the input).
-2. Normalise each channel by its mean and detrend it.
-3. Build a pulse signal: the green channel, or CHROM (de Haan & Jeanne 2013).
+2. Normalise each channel by its mean and detrend it (linear, constant, or
+   smoothness priors, Tarvainen et al. 2002).
+3. Build a pulse signal: the green channel, CHROM (de Haan & Jeanne 2013) or
+   POS (Wang et al. 2017).
 4. Band-pass it (zero-phase Butterworth, default 0.7-3.0 Hz) when the sample
    rate and length support the filter.
-5. Estimate a power spectrum and summarise its dominant peak.
+5. Estimate a Welch power spectrum and summarise its dominant peak, picked
+   either as the strongest bin ("argmax") or by a harmonic sum that favours
+   a frequency whose second harmonic is also present ("harmonic").
 
 Signals that are too short, sampled too slowly or mostly missing are rejected
 with a reason code and a human-readable detail instead of being analysed.
@@ -24,8 +28,9 @@ from dataclasses import asdict, dataclass, field, fields
 import numpy as np
 from scipy import signal as sps
 
-PULSE_METHODS = ("green", "chrom")
-DETREND_MODES = ("linear", "constant", "none")
+PULSE_METHODS = ("green", "chrom", "pos")
+DETREND_MODES = ("linear", "constant", "none", "smoothness_priors")
+PEAK_PICKING = ("argmax", "harmonic")
 # Caps the SNR proxy when the off-peak band power is zero (a pure tone).
 MAX_SNR_DB = 60.0
 
@@ -41,12 +46,17 @@ class SignalConfig:
     min_valid_fraction: float = 0.7  # of frames with a valid sample
     max_gap_s: float = 2.0  # longest run of missing samples that is interpolated
     detrend: str = "linear"
+    # smoothness_priors detrending: high-pass corner (half amplitude) in Hz.
+    detrend_cutoff_hz: float = 0.4
     chrom_window_s: float = 1.6  # CHROM overlap-add window (de Haan used 32 frames at 20 fps)
-    welch_window_s: float = 10.0
+    pos_window_s: float = 1.6  # POS window (Wang et al. 2017 used 1.6 s)
+    welch_window_s: float = 10.0  # Welch segment; a shorter signal is one segment
     spectrum_resolution_hz: float = 0.01  # zero-padded bin spacing
     peak_halfwidth_hz: float = 0.1  # spectral window counted as "the peak"
     stability_window_s: float = 6.0
     stability_step_s: float = 1.0
+    peak_picking: str = "argmax"
+    harmonic_weight: float = 0.5  # "harmonic": score P(f) + weight * P(2f)
 
     def __post_init__(self) -> None:
         low, high = self.band_hz
@@ -56,6 +66,10 @@ class SignalConfig:
             raise ValueError(f"detrend must be one of {DETREND_MODES}, got {self.detrend!r}")
         if self.filter_order < 1:
             raise ValueError("filter_order must be at least 1")
+        if self.peak_picking not in PEAK_PICKING:
+            raise ValueError(f"peak_picking must be one of {PEAK_PICKING}")
+        if self.detrend_cutoff_hz <= 0:
+            raise ValueError("detrend_cutoff_hz must be positive")
 
     @classmethod
     def from_mapping(cls, values: Mapping | None) -> SignalConfig:
@@ -239,7 +253,31 @@ def resample_uniform(
     return UniformSamples(t=grid, values=resampled, fs_hz=fs, quality=quality)
 
 
-def normalize_detrend(x: np.ndarray, mode: str = "linear") -> np.ndarray:
+def smoothness_priors_detrend(x: np.ndarray, fs_hz: float, cutoff_hz: float) -> np.ndarray:
+    """Smoothness-priors detrending (Tarvainen, Ranta-aho & Karjalainen 2002), along axis 0.
+
+    Removes the trend (I + lambda^2 D2' D2)^-1 z, where D2 is the
+    second-difference operator. Away from the ends this is a zero-phase
+    high-pass with gain x / (1 + x), x = lambda^2 (2 sin(pi f / fs))^4, so
+    lambda = (fs / (2 pi cutoff_hz))^2 puts the half-amplitude point at cutoff_hz.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import splu
+
+    x = np.asarray(x, dtype=np.float64)
+    n = x.shape[0]
+    if n < 3:
+        return x - x.mean(axis=0)
+    lam = (fs_hz / (2 * math.pi * cutoff_hz)) ** 2
+    d2 = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(n - 2, n))
+    system = (sparse.identity(n) + lam**2 * (d2.T @ d2)).tocsc()
+    trend = splu(system).solve(x.reshape(n, -1)).reshape(x.shape)
+    return x - trend
+
+
+def normalize_detrend(
+    x: np.ndarray, mode: str = "linear", fs_hz: float | None = None, cutoff_hz: float = 0.4
+) -> np.ndarray:
     """Divide each channel by its mean (relative change around 0), then detrend."""
     x = np.asarray(x, dtype=np.float64)
     mean = x.mean(axis=0)
@@ -248,6 +286,10 @@ def normalize_detrend(x: np.ndarray, mode: str = "linear") -> np.ndarray:
     rel = x / mean - 1.0
     if mode == "none":
         return rel
+    if mode == "smoothness_priors":
+        if not fs_hz:
+            raise ValueError("smoothness_priors detrending needs the sample rate")
+        return smoothness_priors_detrend(rel, fs_hz, cutoff_hz)
     return sps.detrend(rel, axis=0, type=mode)
 
 
@@ -314,6 +356,37 @@ def chrom_combine(xf: np.ndarray, yf: np.ndarray, fs_hz: float, window_s: float)
     return out
 
 
+def pos_combine(rgb: np.ndarray, fs_hz: float, window_s: float) -> np.ndarray:
+    """POS (Wang, den Brinker, Stuijk & de Haan 2017, "Algorithmic principles of
+    remote PPG", IEEE TBME 64(7)), overlap-added over sliding windows.
+
+    In each window the channels are divided by their window mean, projected
+    onto the plane orthogonal to the skin tone (S1 = G - B, S2 = G + B - 2R)
+    and combined as h = S1 + (std S1 / std S2) S2. `rgb` holds unit-mean
+    channels (columns R, G, B). The sign is flipped so that, like CHROM, the
+    output runs in antiphase to the green channel. One window covers the
+    whole signal when it is shorter than a window.
+    """
+    n = len(rgb)
+    win = int(round(window_s * fs_hz))
+    if win < 4 or win > n:
+        win = n
+    # Every window start (Wang et al. slide by one sample): (starts, 3, win).
+    segs = np.lib.stride_tricks.sliding_window_view(rgb, win, axis=0)
+    mean = segs.mean(axis=2, keepdims=True)
+    cn = segs / np.where(np.abs(mean) < 1e-12, 1.0, mean)
+    s1 = cn[:, 1] - cn[:, 2]
+    s2 = cn[:, 1] + cn[:, 2] - 2 * cn[:, 0]
+    alpha = s1.std(axis=1) / np.maximum(s2.std(axis=1), 1e-12)
+    h = s1 + alpha[:, None] * s2
+    h -= h.mean(axis=1, keepdims=True)
+    out = np.zeros(n)
+    starts = h.shape[0]
+    for k in range(win):  # overlap-add
+        out[k : k + starts] += h[:, k]
+    return -out
+
+
 def power_spectrum(x: np.ndarray, fs_hz: float, config: SignalConfig) -> Spectrum:
     """Welch power spectrum, zero-padded to roughly spectrum_resolution_hz bins."""
     nperseg = min(len(x), max(8, int(round(config.welch_window_s * fs_hz))))
@@ -322,13 +395,28 @@ def power_spectrum(x: np.ndarray, fs_hz: float, config: SignalConfig) -> Spectru
     return Spectrum(freqs_hz=freqs, power=power, band_hz=config.band_hz)
 
 
-def dominant_peak(spectrum: Spectrum, halfwidth_hz: float) -> PeakStats:
-    """Summarise the strongest in-band spectral peak."""
+def dominant_peak(
+    spectrum: Spectrum,
+    halfwidth_hz: float,
+    picking: str = "argmax",
+    harmonic_weight: float = 0.5,
+) -> PeakStats:
+    """Summarise the strongest in-band spectral peak.
+
+    With picking="harmonic" the peak maximises P(f) + harmonic_weight * P(2f)
+    (P(2f) read from the whole spectrum), so a pulse whose second harmonic
+    (e.g. from the dicrotic notch) rivals its fundamental is still reported
+    at the fundamental. The statistics describe the chosen peak.
+    """
     band = spectrum.in_band()
     freqs, power = spectrum.freqs_hz[band], spectrum.power[band]
     if power.size < 3 or not np.isfinite(power).all() or power.sum() <= 0:
         raise SignalRejected("no_spectral_peak", "No usable power in the analysis band")
-    i = int(np.argmax(power))
+    if picking == "harmonic":
+        second = np.interp(2 * freqs, spectrum.freqs_hz, spectrum.power, right=0.0)
+        i = int(np.argmax(power + harmonic_weight * second))
+    else:
+        i = int(np.argmax(power))
     # Parabolic interpolation refines the peak between zero-padded bins.
     freq = float(freqs[i])
     if 0 < i < power.size - 1:
@@ -369,7 +457,10 @@ def window_frequencies(x: np.ndarray, fs_hz: float, config: SignalConfig) -> np.
         f, p = sps.periodogram(seg, fs=fs_hz, window="hann", nfft=nfft, detrend="linear")
         spec = Spectrum(f, p, config.band_hz)
         try:
-            freqs.append(dominant_peak(spec, config.peak_halfwidth_hz).frequency_hz)
+            peak = dominant_peak(
+                spec, config.peak_halfwidth_hz, config.peak_picking, config.harmonic_weight
+            )
+            freqs.append(peak.frequency_hz)
         except SignalRejected:
             continue
     return np.asarray(freqs, dtype=np.float64)
@@ -392,6 +483,15 @@ def _pulse_from_channels(rel: np.ndarray, method: str, fs: float, config: Signal
         info["chrom_window_s"] = config.chrom_window_s
         info["chrom_edge_handling"] = "Hann overlap-add tapers the first and last half window"
         return chrom_combine(xy[:, 0], xy[:, 1], fs, config.chrom_window_s), info
+    if method == "pos":
+        if rel.shape[1] != 3:
+            raise ValueError("POS needs three colour channels (R, G, B)")
+        h, info = bandpass(
+            pos_combine(rel + 1.0, fs, config.pos_window_s), fs, config.band_hz, config.filter_order
+        )
+        info["pos_window_s"] = config.pos_window_s
+        info["pos_edge_handling"] = "edge samples are covered by fewer overlapping windows"
+        return h, info
     raise ValueError(f"unknown pulse method {method!r}; expected one of {PULSE_METHODS}")
 
 
@@ -401,12 +501,14 @@ def process_trace(
     method: str = "green",
     config: SignalConfig | None = None,
     span_s: tuple[float, float] | None = None,
+    stability: bool = True,
 ) -> ProcessedSignal:
     """Turn a colour trace into a band-limited pulse signal and its spectrum.
 
     `values` is (N, 3) RGB with NaN for missing frames, or (N,) for a single
     channel (only the "green" method, which then uses that channel). Invalid
     input is returned as a rejected ProcessedSignal, never raised.
+    `stability=False` skips the per-window frequencies (window_freqs_hz empty).
     """
     config = config or SignalConfig()
     if method not in PULSE_METHODS:
@@ -416,12 +518,16 @@ def process_trace(
     try:
         uniform = resample_uniform(timestamps_s, values, config, span_s)
         quality = uniform.quality
-        rel = normalize_detrend(uniform.values, config.detrend)
+        rel = normalize_detrend(
+            uniform.values, config.detrend, uniform.fs_hz, config.detrend_cutoff_hz
+        )
         pulse, filter_info = _pulse_from_channels(rel, method, uniform.fs_hz, config)
         settings["filter"] = filter_info
         pulse = _standardize(pulse)
         spectrum = power_spectrum(pulse, uniform.fs_hz, config)
-        peak = dominant_peak(spectrum, config.peak_halfwidth_hz)
+        peak = dominant_peak(
+            spectrum, config.peak_halfwidth_hz, config.peak_picking, config.harmonic_weight
+        )
     except SignalRejected as exc:
         return ProcessedSignal(
             method=method,
@@ -439,7 +545,50 @@ def process_trace(
         signal=pulse,
         spectrum=spectrum,
         peak=peak,
-        window_freqs_hz=window_frequencies(pulse, uniform.fs_hz, config),
+        window_freqs_hz=(
+            window_frequencies(pulse, uniform.fs_hz, config) if stability else np.zeros(0)
+        ),
         quality=quality,
         settings=settings,
     )
+
+
+def fuse_spectra(spectra: list[Spectrum]) -> Spectrum:
+    """Average of spectra on one frequency grid, each scaled to unit in-band power.
+
+    Combines several ROIs so that no single region dominates by its noise
+    level. All spectra must share the frequency grid (same sample rate,
+    length and settings).
+    """
+    if not spectra:
+        raise SignalRejected("no_spectral_peak", "No spectrum to fuse")
+    base = spectra[0]
+    total = np.zeros_like(base.power)
+    for spec in spectra:
+        if spec.freqs_hz.shape != base.freqs_hz.shape or not np.allclose(
+            spec.freqs_hz, base.freqs_hz
+        ):
+            raise ValueError("spectra to fuse must share a frequency grid")
+        in_band = float(spec.power[spec.in_band()].sum())
+        if in_band > 0 and math.isfinite(in_band):
+            total += spec.power / in_band
+    return Spectrum(freqs_hz=base.freqs_hz, power=total / len(spectra), band_hz=base.band_hz)
+
+
+def snr_at_frequency(spectrum: Spectrum, freq_hz: float, halfwidth_hz: float = 0.1) -> float:
+    """SNR (dB) of a known pulse frequency, after de Haan & Jeanne (2013).
+
+    Signal: in-band power within +/- halfwidth of freq_hz and within
+    +/- 2 x halfwidth of its second harmonic; noise: all other in-band power.
+    """
+    band = spectrum.in_band()
+    f, p = spectrum.freqs_hz[band], spectrum.power[band]
+    signal_bins = (np.abs(f - freq_hz) <= halfwidth_hz) | (
+        np.abs(f - 2 * freq_hz) <= 2 * halfwidth_hz
+    )
+    sig, noise = float(p[signal_bins].sum()), float(p[~signal_bins].sum())
+    if sig <= 0:
+        return -MAX_SNR_DB
+    if noise <= 0:
+        return MAX_SNR_DB
+    return float(np.clip(10 * math.log10(sig / noise), -MAX_SNR_DB, MAX_SNR_DB))

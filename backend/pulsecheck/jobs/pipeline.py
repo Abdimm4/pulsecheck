@@ -23,7 +23,7 @@ from pulsecheck.jobs.validation import (
     check_metadata,
 )
 from pulsecheck.models import MODEL_NAME, MODEL_VERSION, HeuristicConfig, ResultState, classify
-from pulsecheck.signals import SignalConfig, extract_rgb_traces
+from pulsecheck.signals import ColorSignalConfig, SignalConfig, extract_rgb_traces
 from pulsecheck.video import VideoDecodeError, VideoMetadata, iter_frames, probe_video
 
 ANALYSIS_UNAVAILABLE = "analysis_unavailable"
@@ -99,6 +99,8 @@ class PipelineAnalyzer:
     quality: QualityConfig = field(default_factory=QualityConfig)
     pulse_method: str = "chrom"
     classifier: Classifier = field(default_factory=Classifier)
+    color: ColorSignalConfig = field(default_factory=ColorSignalConfig)
+    hr_source: str = "per_roi"
     landmarker_path: str | None = None
 
     @classmethod
@@ -111,6 +113,8 @@ class PipelineAnalyzer:
             signal=SignalConfig.from_mapping(config.get("signal")),
             quality=QualityConfig.from_mapping(features.get("quality")),
             pulse_method=features.get("pulse_method", "chrom"),
+            color=ColorSignalConfig.from_mapping(config.get("color_signal")),
+            hr_source=features.get("hr_source", "per_roi"),
             classifier=Classifier(
                 HeuristicConfig.from_mapping(config.get("heuristic")), model_path
             ),
@@ -134,12 +138,14 @@ class PipelineAnalyzer:
         try:
             with FaceLandmarkerDetector(self.landmarker_path) as detector:
                 frames = iter_frames(path, max_frames=self.limits.max_frames)
-                traces = extract_rgb_traces(frames, detector)
+                traces = extract_rgb_traces(frames, detector, **self.color.extract_kwargs())
         except LandmarkerUnavailableError as exc:
             raise AnalysisUnavailable(str(exc)) from exc
         except VideoDecodeError:
             raise UploadRejected(CORRUPT_VIDEO, "The video could not be decoded.") from None
-        signals = analyze_traces(traces, self.signal, self.pulse_method, self.quality)
+        signals = analyze_traces(
+            traces, self.signal, self.pulse_method, self.quality, self.hr_source
+        )
         return AnalysisOutput(
             video=meta,
             tracking=traces.tracking,

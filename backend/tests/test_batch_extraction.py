@@ -80,6 +80,17 @@ def test_missing_file_is_file_not_found(tmp_path, manifest):
     assert read_table(out)[0]["failure_reason"] == FILE_NOT_FOUND
 
 
+def test_known_normalisation_failure_keeps_its_reason(tmp_path, manifest):
+    root, rows = manifest
+    (root / rows[0].path).unlink()
+    out = tmp_path / "features.csv"
+    known = {rows[0].video_id: "too_short: 6.20 s decoded, need 8.0 s"}
+    run_extraction(rows[:1], root, out, PipelineAnalyzer(), known_failures=known)
+    row = read_table(out)[0]
+    assert row["failure_reason"] == "normalization_too_short"
+    assert row["failure_detail"] == "6.20 s decoded, need 8.0 s"
+
+
 def test_resume_skips_done_and_retries_failed_on_request(tmp_path, manifest):
     root, rows = manifest
     out = tmp_path / "features.csv"

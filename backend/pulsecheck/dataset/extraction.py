@@ -5,6 +5,11 @@ signals -> features) for every manifest row and appends one row per video to
 the feature table as soon as it finishes, so an interrupted run resumes where
 it stopped. Videos that fail are recorded with a reason code. A missing
 landmarker model would fail every video, so it aborts the run instead.
+
+A manifest of normalised copies lists the clips that could not be normalised
+(sidecar `normalization_failed`); their missing file is then recorded as
+`normalization_<reason>` (e.g. normalization_too_short) with the original
+detail, not as file_not_found.
 """
 
 from __future__ import annotations
@@ -31,12 +36,13 @@ from pulsecheck.dataset.table import (
     read_table,
 )
 from pulsecheck.features import FEATURE_SCHEMA_VERSION, FeatureVector, QualityConfig, analyze_traces
-from pulsecheck.signals import SignalConfig
+from pulsecheck.signals import ColorSignalConfig, SignalConfig
 
 log = logging.getLogger("pulsecheck.extraction")
 
 # Failure reason codes recorded in the feature table.
 FILE_NOT_FOUND = "file_not_found"
+NORMALIZATION_PREFIX = "normalization_"  # + the normalisation failure code
 VIDEO_DECODE_ERROR = "video_decode_error"
 NO_FRAMES = "no_frames"
 PIPELINE_ERROR = "pipeline_error"
@@ -75,9 +81,13 @@ class PipelineAnalyzer:
     signal: dict = field(default_factory=dict)
     quality: dict = field(default_factory=dict)
     pulse_method: str = "chrom"
+    color: dict = field(default_factory=dict)  # configs/default.yaml `color_signal:`
+    hr_source: str = "per_roi"
 
     def settings(self) -> dict:
         return {
+            "color_signal": ColorSignalConfig.from_mapping(self.color).to_dict(),
+            "hr_source": self.hr_source,
             "signal": SignalConfig.from_mapping(self.signal).to_dict(),
             "quality": {
                 k: list(v) for k, v in asdict(QualityConfig.from_mapping(self.quality)).items()
@@ -102,7 +112,11 @@ class PipelineAnalyzer:
             raise ExtractionFailure(VIDEO_DECODE_ERROR, str(exc)) from None
         try:
             with FaceLandmarkerDetector(self.model_path) as detector:
-                traces = extract_rgb_traces(chain([first], frames), detector)
+                traces = extract_rgb_traces(
+                    chain([first], frames),
+                    detector,
+                    **ColorSignalConfig.from_mapping(self.color).extract_kwargs(),
+                )
         except LandmarkerUnavailableError as exc:
             raise FatalExtractionError(str(exc)) from exc
         except VideoDecodeError as exc:
@@ -112,6 +126,7 @@ class PipelineAnalyzer:
             SignalConfig.from_mapping(self.signal),
             self.pulse_method,
             QualityConfig.from_mapping(self.quality),
+            self.hr_source,
         )
         t = traces.timestamps_s[np.isfinite(traces.timestamps_s)]
         duration = float(t[-1] - t[0]) if t.size >= 2 else None
@@ -123,14 +138,22 @@ def _meta(row: ManifestRow) -> dict:
     return asdict(row)
 
 
-def process_one(task: tuple[ManifestRow, Path, Analyzer]) -> dict[str, str]:
-    """Run one video and return its table row; FatalExtractionError propagates."""
-    row, path, analyzer = task
+def process_one(task: tuple) -> dict[str, str]:
+    """Run one video and return its table row; FatalExtractionError propagates.
+
+    `task` is (row, path, analyzer) or (row, path, analyzer, known_failure),
+    where known_failure is "code: detail" from the normalisation sidecar.
+    """
+    row, path, analyzer = task[:3]
+    known_failure = task[3] if len(task) > 3 else None
     start = time.perf_counter()
     status: dict = {"feature_schema_version": FEATURE_SCHEMA_VERSION}
     features = None
     try:
         if not path.is_file():
+            if known_failure:
+                code, _, detail = known_failure.partition(":")
+                raise ExtractionFailure(NORMALIZATION_PREFIX + code.strip(), detail.strip())
             raise ExtractionFailure(FILE_NOT_FOUND, str(path))
         result = analyzer(path)
         features = result.features
@@ -190,14 +213,20 @@ def run_extraction(
     analyzer: Analyzer,
     workers: int = 1,
     retry_failed: bool = False,
+    known_failures: dict[str, str] | None = None,
 ) -> ExtractionSummary:
-    """Process every pending row, appending results to `output` as they finish."""
+    """Process every pending row, appending results to `output` as they finish.
+
+    `known_failures` maps video_id to "code: detail" for clips whose file is
+    known to be absent (e.g. the normalisation sidecar's failures).
+    """
     rows = list(rows)
     root, output = Path(root), Path(output)
     todo, skipped = pending_rows(rows, output, retry_failed)
     if skipped:
         log.info("resuming: %d of %d videos already in %s", skipped, len(rows), output)
-    tasks = [(row, root / row.path, analyzer) for row in todo]
+    known_failures = known_failures or {}
+    tasks = [(row, root / row.path, analyzer, known_failures.get(row.video_id)) for row in todo]
     reasons: Counter[str] = Counter()
     ok = failed = 0
     start = time.perf_counter()

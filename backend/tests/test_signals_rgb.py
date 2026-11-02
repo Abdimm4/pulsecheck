@@ -118,3 +118,67 @@ def test_works_end_to_end_with_iter_frames(tmp_path: Path):
         assert traces.rois[name].valid.all()
         # Lossy compression shifts flat colours slightly.
         np.testing.assert_allclose(traces.rois[name].rgb, expected, atol=4)
+
+
+def test_landmark_smoothing_stream_matches_offline_smoothing():
+    from pulsecheck.signals.rgb import smooth_landmarks, smoothed_landmark_stream
+
+    rng = np.random.default_rng(0)
+    base = synthetic_landmarks()
+    marks = [base + rng.normal(0, 2, base.shape).astype(np.float32) for _ in range(20)]
+    marks[3] = marks[11] = None
+
+    class Replay:
+        def __init__(self):
+            self.i = -1
+
+        def detect(self, image, timestamp_s):
+            self.i += 1
+            return marks[self.i]
+
+    frames = [Frame(i, i / 30, np.zeros((4, 4, 3), np.uint8)) for i in range(20)]
+    for window in (0, 5, 7):
+        streamed = list(smoothed_landmark_stream(frames, Replay(), window))
+        offline = smooth_landmarks(marks, window)
+        assert [f.index for f, _ in streamed] == list(range(20))
+        for (_, got), want in zip(streamed, offline, strict=True):
+            if want is None:
+                assert got is None
+            else:
+                np.testing.assert_allclose(got, want, atol=1e-5)
+    smoothed = smooth_landmarks(marks, 7)
+    jitter = np.mean([np.abs(a - base).mean() for a in marks if a is not None])
+    assert np.mean([np.abs(a - base).mean() for a in smoothed if a is not None]) < jitter
+
+
+def test_robust_statistic_ignores_outlier_pixels():
+    from pulsecheck.face import RoiConfig, compute_rois
+    from pulsecheck.signals.rgb import roi_mean_rgb
+
+    landmarks = synthetic_landmarks()
+    image = render_face(landmarks, (100, 150, 200))
+    roi = compute_rois(landmarks, image.shape, RoiConfig())["forehead"]
+    x0, y0, x1, y1 = roi.bbox
+    ys, xs = np.nonzero(roi.mask)
+    image[y0 + ys[:40], x0 + xs[:40]] = (20, 20, 20)  # e.g. stray hair
+    plain, _ = roi_mean_rgb(image, roi, "mean")
+    robust, _ = roi_mean_rgb(image, roi, "robust")
+    np.testing.assert_allclose(robust, (200, 150, 100))
+    assert plain[0] < 199
+
+
+def test_color_config_builds_face_roi_traces():
+    from pulsecheck.signals import ColorSignalConfig
+
+    config = ColorSignalConfig.from_mapping(
+        {"face_roi": True, "roi_layout": "large", "landmark_smoothing_frames": 5}
+    )
+    traces = extract_rgb_traces(_frames(12), FakeDetector(), **config.extract_kwargs())
+    assert set(traces.rois) == {*ROI_NAMES, "face"}
+    assert traces.rois["face"].valid.all()
+    assert "face" in traces.tracking.rois
+    assert traces.settings["landmark_smoothing_frames"] == 5
+    with pytest.raises(ValueError):
+        ColorSignalConfig.from_mapping({"statistic": "median"})
+    with pytest.raises(ValueError):
+        ColorSignalConfig.from_mapping({"face": True})

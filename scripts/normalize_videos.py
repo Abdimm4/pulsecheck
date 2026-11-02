@@ -11,7 +11,8 @@ relative layout; the new manifest (default data/manifests/<name>_norm.csv)
 keeps every id, label, split, group and cv_fold and points at the copies. Its
 JSON sidecar records the settings and every clip that failed (too short, no
 face, decode error) with its reason; failed clips stay in the manifest, so
-extraction counts them as failed (file_not_found) instead of dropping them.
+extraction counts them as failed (normalization_<reason>, e.g.
+normalization_too_short) instead of dropping them.
 Per-clip summary numbers (crop box, gain, clipped fraction) go to
 normalization.csv in the output root. Everything is derived data: keep it
 under data/ (ignored by Git) and do not redistribute it.

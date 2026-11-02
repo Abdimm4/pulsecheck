@@ -23,13 +23,13 @@ from pulsecheck.config import load_config
 from pulsecheck.face import LandmarkerUnavailableError
 from pulsecheck.features import QualityConfig, VideoSignals, analyze_traces
 from pulsecheck.models import HeuristicConfig, classify
-from pulsecheck.signals import SignalConfig, extract_video_traces
+from pulsecheck.signals import ColorSignalConfig, SignalConfig, extract_video_traces
 from pulsecheck.video import VideoDecodeError
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-METHOD_COLORS = {"green": "#2e933c", "chrom": "#7b3fa0"}
+METHOD_COLORS = {"green": "#2e933c", "chrom": "#7b3fa0", "pos": "#d1792b"}
 
 
 def _title(roi: str, analysis: VideoSignals) -> str:
@@ -103,13 +103,22 @@ def main() -> int:
     heuristic_config = HeuristicConfig.from_mapping(config.get("heuristic"))
 
     try:
-        traces = extract_video_traces(args.video, args.model, max_frames=args.max_frames)
+        traces = extract_video_traces(
+            args.video,
+            args.model,
+            max_frames=args.max_frames,
+            color_config=ColorSignalConfig.from_mapping(config.get("color_signal")),
+        )
     except (VideoDecodeError, LandmarkerUnavailableError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     analysis = analyze_traces(
-        traces, signal_config, feature_config.get("pulse_method", "chrom"), quality_config
+        traces,
+        signal_config,
+        feature_config.get("pulse_method", "chrom"),
+        quality_config,
+        feature_config.get("hr_source", "per_roi"),
     )
     result = classify(analysis.features, heuristic_config)
 

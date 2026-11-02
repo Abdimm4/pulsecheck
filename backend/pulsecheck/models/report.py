@@ -159,6 +159,26 @@ def render_markdown(report: Mapping) -> str:
         shown = json.dumps(value) if isinstance(value, dict | list) else value
         lines.append(f"- **{key}**: {shown}")
     lines += ["", *(f"- {note}" for note in cond.get("notes", [])), ""]
+    prior = report.get("prior_split_evaluations")
+    if prior is not None:
+        lines += ["## Earlier evaluations of this split", ""]
+        if not prior:
+            lines += ["None found under the reports directory.", ""]
+        else:
+            lines += [
+                f"This {cond['split']} split (same dataset and split definition) was scored "
+                f"{len(prior)} time(s) before this report, so it is no longer an untouched "
+                "held-out set (PRD Section 13, test-split discipline):",
+                "",
+                "| Report | Created | Compression | Gate | Models |",
+                "|---|---|---|---|---|",
+            ]
+            for p in prior:
+                lines.append(
+                    f"| {p['report']} | {p['created_at']} | {p['compression']} | "
+                    f"{p['heuristic_quality_gate']} | {p['models']} |"
+                )
+            lines.append("")
 
     lines += [
         "## Summary",
@@ -386,6 +406,7 @@ def run_evaluation(
     extra: Mapping[str, Mapping[str, str]] | None = None,
     family_of: Mapping[str, str] | None = None,
     heuristic_gate: str = "default",
+    reports_root: str | Path | None = None,
 ) -> tuple[dict, dict[str, list[Prediction]]]:
     """Score trained models and the heuristic on one split of a feature table.
 
@@ -396,6 +417,8 @@ def run_evaluation(
     `extra` columns (manifest, media table) are joined onto the rows, and
     `family_of` adds a per-family breakdown. A model whose features are not
     columns of the table raises ValueError instead of being imputed blindly.
+    With `reports_root`, a test report lists the earlier evaluation reports of
+    the same split found there (prior_split_evaluations).
     """
     table_path = Path(table_path)
     data = load_table(table_path, extra)  # raises LeakageError
@@ -517,6 +540,19 @@ def run_evaluation(
         },
         "methods": methods,
         "shortcut_baseline": shortcut,
+        "prior_split_evaluations": (
+            prior_split_evaluations(
+                reports_root,
+                {
+                    "dataset": dataset.get("dataset"),
+                    "split_source": dataset.get("split_source"),
+                    "split": split,
+                },
+                now.isoformat(timespec="seconds"),
+            )
+            if reports_root is not None and split == "test"
+            else None
+        ),
         "runtime": {
             "extraction": runtime_summary([float(r["runtime_s"] or "nan") for r in all_rows]),
             "videos": len(all_rows),
@@ -541,6 +577,36 @@ def run_evaluation(
                 json.dumps(model.sidecar, indent=2, allow_nan=False), encoding="utf-8"
             )
     return report, predictions
+
+
+def prior_split_evaluations(
+    reports_root: str | Path, conditions: Mapping, before: str | None = None
+) -> list[dict]:
+    """Earlier evaluation reports of the same dataset, split definition and split.
+
+    Normalised copies of a dataset share its split definition, so their test
+    evaluations count as uses of the same test split.
+    """
+    out = []
+    for path in sorted(Path(reports_root).rglob("evaluation-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        cond = data.get("evaluation_conditions") or {}
+        same = all(cond.get(k) == conditions.get(k) for k in ("dataset", "split_source", "split"))
+        if not same or (before and data.get("created_at", "") >= before):
+            continue
+        out.append(
+            {
+                "report": path.name,
+                "created_at": data.get("created_at"),
+                "compression": cond.get("compression"),
+                "heuristic_quality_gate": cond.get("heuristic_quality_gate"),
+                "models": len(cond.get("models_trained_on") or {}),
+            }
+        )
+    return sorted(out, key=lambda p: p["created_at"] or "")
 
 
 def _test_evaluations(model: TrainedModel) -> int:

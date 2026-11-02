@@ -114,6 +114,8 @@ def main() -> int:
         signal=config.get("signal") or {},
         quality=features.get("quality") or {},
         pulse_method=features.get("pulse_method", "chrom"),
+        color=config.get("color_signal") or {},
+        hr_source=features.get("hr_source", "per_roi"),
     )
     if args.overwrite:
         out.unlink(missing_ok=True)
@@ -131,7 +133,15 @@ def main() -> int:
 
     summary = None
     try:
-        summary = run_extraction(rows, root, out, analyzer, args.workers, args.retry_failed)
+        summary = run_extraction(
+            rows,
+            root,
+            out,
+            analyzer,
+            args.workers,
+            args.retry_failed,
+            read_sidecar(args.manifest).get("normalization_failed") or {},
+        )
     except FatalExtractionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

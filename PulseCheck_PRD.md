@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Version** | 2.4 (shortcut-check findings: source/compression confound requirements, FR-12 pulse extraction validation, Phase 5A; v2.3 made PulseCheck free and non-commercial) |
+| **Version** | 2.5 (November 1, 2026: Phase 5A results: injection benchmark, selected extraction pipeline, recalibrated quality ramps, normalised NFI-rPPG re-evaluated; the outcome is negative/inconclusive and FaceForensics++ v2 is deferred. v2.4 added the shortcut-check findings, FR-12 and Phase 5A; v2.3 made PulseCheck free and non-commercial) |
 | **Date** | November 1, 2026 |
 | **Product owner** | Solo developer |
 | **Product type** | Public web application / computer-vision research tool |
@@ -457,6 +457,14 @@ Before trained-classifier results are interpreted, show that the pipeline recove
 4. **Recalibrate the quality ramps** (SNR, spectral concentration) from benchmark results instead of synthetic white noise.
 5. **Then** re-extract deepfake features and rerun the shortcut-baseline evaluation (Section 13).
 
+v2.5 status (Phase 5A, November 1, 2026):
+
+- Item 1 done (`scripts/benchmark_extraction.py`; 99 real train-split clips from FaceForensics++ c23 and normalised NFI-rPPG, split by source group into dev and held-out halves; pulse amplitudes 0–2 %, libx264 CRF 18/23/28/35 and CRF 23 at half resolution). The codec keeps a median of ~62 % of the injected change at CRF 23 and ~50 % at CRF 28. The current pipeline (CHROM, three regional ROIs) detects 4–10 % (|error| ≤ 5 bpm) at 0.2–0.5 % amplitude on dev against a 2–7 % null false-detection rate.
+- Item 2 not done: the UBFC-rPPG loader and parser are built and tested, but the dataset is not available locally (it must be requested from its authors), so no ground-truth results exist.
+- Item 3 done on the dev half: POS on a whole-face skin ROI, smoothness-priors detrending, filter order 2, 6 s Welch window. It is opt-in through configuration; the earlier pipeline stays the default because the selected one was not a demonstrated improvement and extracts about twice as slowly. On the held-out half, selected − current detection at 0.2–1 % amplitude and CRF 23–28 is +3.2 pp [−2.8, +10.6], which is not a demonstrated improvement. The selected pipeline is clearly better only at 1–2 % amplitude (e.g. 2 %, CRF 23: 73 % vs 49 %). A pulse is reliably recovered only at 2 % amplitude with light compression (CRF 18: 83 %; CRF 23: 73 %).
+- Item 4 done: ramps fitted on dev (spectral concentration 0.264–0.309, SNR 7.06–8.22 dB). The score separates correct from incorrect heart-rate estimates only weakly (ROC-AUC 0.62 dev, 0.58 held-out; old ramps 0.58 / 0.57).
+- Item 5 done for normalised NFI-rPPG only (Section 13). The FaceForensics++ c23 re-extraction was stopped after 334 of 6000 videos: per-video extraction time roughly doubled with the whole-face skin ROI (median 39 s vs 18 s per video), an estimated ~18 h at 4 workers. It is deferred and not evaluated.
+
 ## 12. API Design
 
 Suggested endpoints:
@@ -554,9 +562,20 @@ Findings as of November 1, 2026 (test ROC-AUC, gate off, ranges over logistic re
 
 Neither dataset shows pulse signal beyond the shortcut, and the earlier NFI pulse scores were mostly the shortcut. FR-12 comes before further classifier work.
 
+Phase 5A re-evaluation (v2.5, November 1, 2026). Normalised NFI-rPPG was re-extracted with the selected pipeline (feature schema 2), and 8 models were trained with grouped cross-validation on train. The test split was scored once, its fourth evaluation. Test ROC-AUC [95% CI], gate off:
+
+| Model family | Shortcut | Pulse | Pulse − shortcut | Combined | Combined − shortcut |
+|---|---|---|---|---|---|
+| Logistic regression | 0.534 [0.350, 0.772] | 0.745 [0.570, 0.870] | +0.211 [−0.071, 0.434] | 0.605 [0.442, 0.781] | +0.071 [−0.049, 0.168] |
+| Random forest | 0.555 [0.365, 0.743] | 0.709 [0.549, 0.849] | +0.154 [−0.051, 0.364] | 0.634 [0.447, 0.821] | +0.078 [−0.117, 0.252] |
+
+The criterion is not met for either family: every interval includes 0. Training cross-validation does not support the pulse models' higher test ROC-AUC (out-of-fold ROC-AUC 0.50 for both, against 0.72–0.75 for the shortcut models). The test split has only 82 videos in 14 groups. So this is not evidence of pulse signal. With the default quality gate, the pulse models rank the same videos the same way (ROC-AUC unchanged) but decide only 40–44 % of them. The heuristic scores 0.620 [0.373, 0.885] at 0.44 coverage. The confound audit flags none of the 43 schema-2 classifier features on the train split (|ρ| < 0.3 and cross-validated R² < 0.2 against every media property). Brightness (0.71) and bitrate (0.61) still separate real from fake on their own. FaceForensics++ c23 was not re-evaluated (FR-12 status).
+
 ### Test-split discipline
 
 Each test split has already been scored more than once (NFI-rPPG: three evaluations including the normalised copy; FaceForensics++ c23: two). Further development decisions must use validation or cross-validation only. The next test evaluation of each dataset is reserved for the Phase 5A exit, and reports must list prior test evaluations of the same split.
+
+v2.5: the NFI-rPPG test split has now been scored a fourth time (the reserved Phase 5A evaluation), and evaluation reports list the earlier evaluations of the same split. Phase 5A did not use the FaceForensics++ c23 test split. It stays reserved for the deferred v2 evaluation.
 
 ---
 
@@ -736,13 +755,15 @@ Keep videos, secrets, environment files, and large model/data files out of Git. 
 
 Shortcut checks after Phase 5 showed that the pulse features add nothing beyond media properties on FaceForensics++ c23 or normalised NFI-rPPG, and that the pipeline rarely recovers a clear pulse from real compressed videos. This phase implements FR-12.
 
-- Build the semi-synthetic injection benchmark (amplitude × compression × resolution × motion) and a ground-truth dataset loader (UBFC-rPPG or similar, once access is granted).
-- Add per-clip diagnostics: skin pixels per ROI, motion, compression level, per-ROI SNR.
-- Compare and tune extraction variants on the benchmarks: green, CHROM, POS; larger or skin-segmented ROIs; landmark smoothing and motion handling; detrending and windowing.
-- Recalibrate the quality ramps from benchmark results.
-- Re-extract FaceForensics++ c23 and normalised NFI-rPPG with the selected pipeline, retrain pulse, shortcut and combined models with selection on validation only, and score each test split once with the shortcut baseline.
+- Build the semi-synthetic injection benchmark (amplitude × compression × resolution × motion) and a ground-truth dataset loader (UBFC-rPPG or similar, once access is granted). *v2.5: benchmark done. The UBFC-rPPG loader is done, but the dataset is not available, so it was not run.*
+- Add per-clip diagnostics: skin pixels per ROI, motion, compression level, per-ROI SNR. *v2.5: done (benchmark cache and report).*
+- Compare and tune extraction variants on the benchmarks: green, CHROM, POS; larger or skin-segmented ROIs; landmark smoothing and motion handling; detrending and windowing. *v2.5: done on the dev half; all variants are config options.*
+- Recalibrate the quality ramps from benchmark results. *v2.5: done; the score separates correct from incorrect estimates only weakly (held-out ROC-AUC 0.58).*
+- Re-extract FaceForensics++ c23 and normalised NFI-rPPG with the selected pipeline, retrain pulse, shortcut and combined models with selection on validation only, and score each test split once with the shortcut baseline. *v2.5: done for normalised NFI-rPPG (criterion not met, Section 13). FaceForensics++ c23 is deferred: re-extraction stopped at 334 of 6000 videos (estimated ~18 h at 4 workers). The partial table is kept, but no model was trained or evaluated on it.*
 
 **Exit criterion:** the benchmark report documents heart-rate recovery (fraction within ±5 bpm, MAE) by amplitude and compression for the current and the selected pipeline, and the selected pipeline is a documented improvement at realistic amplitude and c23-like compression; ground-truth results are reported if a dataset is available; and the deepfake reports state whether the shortcut-baseline criterion is met. A negative result is an acceptable, documented outcome.
+
+**v2.5 exit outcome: a documented negative/inconclusive result.** The benchmark report documents heart-rate recovery for the current and the selected pipeline. The selected pipeline is not a demonstrated improvement at realistic amplitude and c23-like compression (held-out +3.2 pp [−2.8, +10.6]). No ground-truth dataset was available. The normalised NFI-rPPG report states that the shortcut-baseline criterion is not met. FaceForensics++ c23 v2 is deferred. Phase 5A is closed on this basis, and no pulse-based accuracy claim can be made.
 
 Phase 6 can proceed in parallel. Phase 8 must not publish accuracy claims until Phase 5A exits.
 
@@ -826,7 +847,7 @@ Use environment variables or a secrets manager for credentials. Do not commit se
 - [ ] Baseline and at least one ML model are compared.
 - [ ] Evaluation uses a documented held-out split and avoids obvious leakage.
 - [ ] Results include multiple metrics and known failure cases.
-- [ ] Pulse extraction is validated against known or ground-truth heart rate (FR-12).
+- [ ] Pulse extraction is validated against known or ground-truth heart rate (FR-12). *v2.5: validated against an injected, known heart rate (semi-synthetic benchmark). Recovery is poor at realistic amplitudes, and there is no ground-truth dataset yet.*
 - [ ] Every reported classifier result includes the shortcut baseline and combined model, and states whether the pulse-claim criterion is met.
 - [ ] Known issues and findings are documented in the README.
 
@@ -889,6 +910,8 @@ Add measured metrics only after you have verified them. Do not claim a particula
 10. Open the public beta only after privacy and resource-limit tests pass.
 
 v2.4 status (November 1, 2026): steps 1–6 and the queue/storage parts of step 8 are done locally (Phases 1–5 plus shortcut checks). The next research step is Phase 5A (FR-12): validate and improve pulse extraction before any further classifier work. Phase 6 (frontend) may proceed in parallel.
+
+v2.5 status (November 1, 2026): Phase 5A is done, with a negative/inconclusive result (Section 17). Optional follow-ups are the FaceForensics++ c23 v2 re-extraction with its single test evaluation, and UBFC-rPPG ground truth once access is granted. Phase 6 (frontend) is next.
 
 ---
 

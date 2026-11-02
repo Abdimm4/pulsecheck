@@ -1,4 +1,6 @@
 from pulsecheck.signals.processing import (
+    DETREND_MODES,
+    PEAK_PICKING,
     PULSE_METHODS,
     PeakStats,
     ProcessedSignal,
@@ -10,15 +12,21 @@ from pulsecheck.signals.processing import (
     resample_uniform,
 )
 from pulsecheck.signals.rgb import (
+    ColorSignalConfig,
     RgbTraces,
     RoiTrace,
     extract_rgb_traces,
     extract_video_traces,
+    frame_roi_means,
     roi_mean_rgb,
+    smooth_landmarks,
 )
 
 __all__ = [
+    "DETREND_MODES",
+    "PEAK_PICKING",
     "PULSE_METHODS",
+    "ColorSignalConfig",
     "PeakStats",
     "ProcessedSignal",
     "RgbTraces",
@@ -29,7 +37,9 @@ __all__ = [
     "bandpass",
     "extract_rgb_traces",
     "extract_video_traces",
+    "frame_roi_means",
     "process_trace",
     "resample_uniform",
     "roi_mean_rgb",
+    "smooth_landmarks",
 ]

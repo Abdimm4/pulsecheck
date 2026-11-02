@@ -21,7 +21,9 @@ models include a shortcut model (train_model.py --feature-set shortcut) and
 pulse and/or combined models of the same family and training dataset, a
 "Shortcut baseline" section gives the ROC-AUC differences (pulse - shortcut,
 combined - shortcut) with paired group-bootstrap 95% intervals; models with
-extra feature columns need the same --extra-columns here. Writes
+extra feature columns need the same --extra-columns here. A test report also
+lists the earlier evaluations of the same split found under --reports-root
+(same dataset and split definition, including normalised copies). Writes
 data/reports/evaluation-<split>[-<tag>]-<stamp> .md/.json plus per-video
 predictions (.predictions.csv) under data/, which Git ignores. Reports state
 their evaluation conditions and make no general accuracy claim. Exits with
@@ -57,6 +59,12 @@ def main() -> int:
     parser.add_argument("--model", type=Path, action="append", default=[], help="repeatable")
     parser.add_argument("--split", default="test", choices=(*SPLITS, ALL_SPLITS))
     parser.add_argument("--out-dir", type=Path, default=Path("data/reports"))
+    parser.add_argument(
+        "--reports-root",
+        type=Path,
+        default=Path("data/reports"),
+        help="searched for earlier evaluations of the same test split (listed in the report)",
+    )
     parser.add_argument("--config", type=Path, help="YAML config (heuristic thresholds)")
     parser.add_argument("--manifest", type=Path, help="join fake_family/cv_fold for breakdowns")
     parser.add_argument(
@@ -91,6 +99,7 @@ def main() -> int:
             extra=join_tables(args.manifest, args.extra_columns),
             family_of=family_map(args.manifest),
             heuristic_gate=args.heuristic_gate,
+            reports_root=args.reports_root,
         )
     except LeakageError as exc:
         print(f"error: {exc}", file=sys.stderr)

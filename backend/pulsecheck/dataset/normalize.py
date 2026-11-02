@@ -131,6 +131,44 @@ def luma(image_bgr: np.ndarray) -> float:
     return 0.114 * b + 0.587 * g + 0.299 * r
 
 
+def x264_writer(
+    path: str | Path,
+    size: tuple[int, int],
+    fps: float,
+    crf: int,
+    preset: str = "medium",
+    pix_fmt: str = "yuv420p",
+    codec: str = "libx264",
+):
+    """A started imageio-ffmpeg writer: send() BGR uint8 frames of `size` (w, h), then close().
+
+    The same encoder settings as the normalised copies (one thread, no audio,
+    no metadata). Raises ImportError without imageio-ffmpeg.
+    """
+    import imageio_ffmpeg
+
+    writer = imageio_ffmpeg.write_frames(
+        str(path),
+        tuple(size),
+        pix_fmt_in="bgr24",
+        pix_fmt_out=pix_fmt,
+        fps=fps,
+        quality=None,
+        codec=codec,
+        macro_block_size=1,
+        ffmpeg_log_level="error",
+        output_params=[
+            "-crf", str(crf),
+            "-preset", preset,
+            "-threads", "1",
+            "-an",
+            "-map_metadata", "-1",
+        ],
+    )  # fmt: skip
+    writer.send(None)
+    return writer
+
+
 def _write(path: Path, frames: list[np.ndarray], config: NormalizeConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.stem + ".part" + path.suffix)
@@ -140,29 +178,15 @@ def _write(path: Path, frames: list[np.ndarray], config: NormalizeConfig) -> Non
         imageio_ffmpeg = None
     try:
         if imageio_ffmpeg is not None:
-            writer = imageio_ffmpeg.write_frames(
-                str(tmp),
+            writer = x264_writer(
+                tmp,
                 (config.size, config.size),
-                pix_fmt_in="bgr24",
-                pix_fmt_out=config.pix_fmt,
-                fps=config.fps,
-                quality=None,
-                codec=config.codec,
-                macro_block_size=1,
-                ffmpeg_log_level="error",
-                output_params=[
-                    "-crf",
-                    str(config.crf),
-                    "-preset",
-                    config.preset,
-                    "-threads",
-                    "1",
-                    "-an",
-                    "-map_metadata",
-                    "-1",
-                ],
+                config.fps,
+                config.crf,
+                config.preset,
+                config.pix_fmt,
+                config.codec,
             )
-            writer.send(None)
             for image in frames:
                 writer.send(np.ascontiguousarray(image))
             writer.close()

@@ -11,6 +11,14 @@ features are excluded even if the template polygons are tuned badly.
 
 "Left" and "right" follow MediaPipe's convention: they mean the subject's left
 and right, so in an unmirrored video the left cheek appears on the image right.
+
+Two layouts exist (`RoiConfig.layout`): "standard", the original small
+forehead band and cheek patches, and "large", a taller forehead band and
+cheek patches that reach from under the eye to the jaw line (more pixels per
+average, so less quantisation and sensor noise). Either layout can add a
+fourth region, "face" (`RoiConfig.face_roi`): every skin pixel inside the
+face oval except the eyes, eyebrows and lips. Selection between them is
+documented in pulsecheck.benchmark (PRD FR-12).
 """
 
 from __future__ import annotations
@@ -22,7 +30,10 @@ import numpy as np
 
 from pulsecheck.face.landmarker import NUM_LANDMARKS
 
-ROI_NAMES = ("forehead", "left_cheek", "right_cheek")
+ROI_NAMES = ("forehead", "left_cheek", "right_cheek")  # the regional ROIs
+FACE_ROI = "face"  # whole-face skin region, optional (RoiConfig.face_roi)
+ALL_ROI_NAMES = (*ROI_NAMES, FACE_ROI)
+ROI_LAYOUTS = ("standard", "large")
 
 # Landmark indices of the MediaPipe 478-point face mesh. The groups match
 # mediapipe.tasks.python.vision.FaceLandmarksConnections (checked in tests).
@@ -50,11 +61,21 @@ RIGHT_CHEEK_TEMPLATE = np.array(
     [(-0.30, 0.28), (-0.72, 0.28), (-0.76, 0.58), (-0.50, 0.72), (-0.36, 0.55)],
     dtype=np.float32,
 )
+# "large" layout: from just below the lower eyelid, lateral to the nose, down to
+# below the mouth line and out to the face oval (which clips it).
+LARGE_RIGHT_CHEEK_TEMPLATE = np.array(
+    [(-0.24, 0.24), (-0.95, 0.20), (-1.00, 0.75), (-0.75, 1.05), (-0.45, 1.05), (-0.28, 0.62)],
+    dtype=np.float32,
+)
+LARGE_FOREHEAD = (0.06, 0.85)  # (gap, height) as fractions of the eye-to-mouth vector
 
 
 @dataclass(frozen=True)
 class RoiConfig:
-    # Forehead band above the brow line, as fractions of the eye-to-mouth vector.
+    layout: str = "standard"  # ROI_LAYOUTS
+    face_roi: bool = False  # also build the whole-face skin ROI "face"
+    # Forehead band above the brow line, as fractions of the eye-to-mouth vector
+    # (the "large" layout uses LARGE_FOREHEAD instead).
     forehead_gap: float = 0.12
     forehead_height: float = 0.45
     # Margin added around eyes, brows and lips before subtracting them, in IOD.
@@ -63,6 +84,14 @@ class RoiConfig:
     min_interocular_px: float = 20.0
     min_pixels: int = 30
     min_area_fraction: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.layout not in ROI_LAYOUTS:
+            raise ValueError(f"layout must be one of {ROI_LAYOUTS}, got {self.layout!r}")
+
+    @property
+    def roi_names(self) -> tuple[str, ...]:
+        return ALL_ROI_NAMES if self.face_roi else ROI_NAMES
 
 
 @dataclass(frozen=True)
@@ -114,16 +143,23 @@ def roi_polygons(landmarks: np.ndarray, config: RoiConfig | None = None) -> dict
 
     brow = landmarks[list(BROW_TOPS)].astype(np.float32)
     up = -frame.y_axis
-    forehead = np.concatenate(
-        [brow + config.forehead_gap * up, (brow + config.forehead_height * up)[::-1]]
-    )
+    if config.layout == "large":
+        gap, height = LARGE_FOREHEAD
+        cheek = LARGE_RIGHT_CHEEK_TEMPLATE
+    else:
+        gap, height = config.forehead_gap, config.forehead_height
+        cheek = RIGHT_CHEEK_TEMPLATE
+    forehead = np.concatenate([brow + gap * up, (brow + height * up)[::-1]])
 
-    mirrored = RIGHT_CHEEK_TEMPLATE * np.array([-1.0, 1.0], dtype=np.float32)
-    return {
+    mirrored = cheek * np.array([-1.0, 1.0], dtype=np.float32)
+    polygons = {
         "forehead": forehead.astype(np.float32),
         "left_cheek": frame.to_pixels(mirrored[::-1]).astype(np.float32),
-        "right_cheek": frame.to_pixels(RIGHT_CHEEK_TEMPLATE).astype(np.float32),
+        "right_cheek": frame.to_pixels(cheek).astype(np.float32),
     }
+    if config.face_roi:
+        polygons[FACE_ROI] = landmarks[list(FACE_OVAL)].astype(np.float32)
+    return polygons
 
 
 def exclusion_hulls(landmarks: np.ndarray) -> list[np.ndarray]:
@@ -146,10 +182,11 @@ def compute_rois(
     frame_shape: tuple[int, ...],
     config: RoiConfig | None = None,
 ) -> dict[str, Roi]:
-    """Build forehead and cheek masks for one frame and judge their validity."""
+    """Build forehead and cheek (and optional whole-face) masks and judge their validity."""
     config = config or RoiConfig()
+    names = config.roi_names
     if landmarks is None:
-        return {name: _invalid(name, "no_face") for name in ROI_NAMES}
+        return {name: _invalid(name, "no_face") for name in names}
     if landmarks.shape != (NUM_LANDMARKS, 2):
         raise ValueError(f"Expected landmarks of shape ({NUM_LANDMARKS}, 2), got {landmarks.shape}")
 
@@ -157,7 +194,7 @@ def compute_rois(
     height, width = frame_shape[:2]
     frame = face_frame(landmarks)
     if frame.interocular < config.min_interocular_px:
-        return {name: _invalid(name, "face_too_small") for name in ROI_NAMES}
+        return {name: _invalid(name, "face_too_small") for name in names}
 
     oval = landmarks[list(FACE_OVAL)]
     hulls = exclusion_hulls(landmarks)
